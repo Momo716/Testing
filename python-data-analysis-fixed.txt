@@ -1,0 +1,713 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime, timedelta
+import seaborn as sns
+
+# Set plot style
+plt.style.use('ggplot')
+sns.set_palette("colorblind")
+
+def load_and_clean_applications_data(file_path):
+    """
+    Load and clean the applications and renewals dataset.
+    """
+    print(f"Loading applications data from {file_path}...")
+    
+    try:
+        # Load the Excel file with explicit dtype=object to prevent type inference issues
+        df = pd.read_excel(file_path, engine='openpyxl', dtype=object)
+        
+        # Display initial information
+        print(f"Original shape: {df.shape}")
+        print("Original columns:", df.columns.tolist())
+        
+        # Check if there's a header row included as data
+        # Sometimes the actual column names are in the first data row
+        if df.iloc[0].str.contains('Date', case=False).any() or df.iloc[0].str.contains('Province', case=False).any():
+            # Use the first row as header
+            new_headers = df.iloc[0].tolist()
+            df = df.iloc[1:].reset_index(drop=True)
+            df.columns = new_headers
+            print("Renamed columns using first row as header")
+        
+        # Ensure expected columns are present
+        expected_columns = [
+            'Date', 'Province', 
+            'New Applications Received', 'New Applications Completed', 'New Applications Eligible',
+            'Renewals Received', 'Renewals Completed', 'Renewals Eligible',
+            'Total Received', 'Total Completed', 'Total Eligible'
+        ]
+        
+        # Rename columns if necessary
+        print("Renaming columns to match expected names...")
+        # This is a safer approach - it doesn't assume column order but tries to match by name
+        column_mapping = {}
+        
+        # Find date column
+        date_col = None
+        for col in df.columns:
+            if 'date' in str(col).lower():
+                date_col = col
+                column_mapping[col] = 'Date'
+                break
+        
+        # Find province column
+        province_col = None
+        for col in df.columns:
+            if 'province' in str(col).lower() or 'prov' in str(col).lower():
+                province_col = col
+                column_mapping[col] = 'Province'
+                break
+        
+        # Find application and renewal columns
+        for col in df.columns:
+            col_str = str(col).lower()
+            if 'new' in col_str and 'received' in col_str:
+                column_mapping[col] = 'New Applications Received'
+            elif 'new' in col_str and 'completed' in col_str:
+                column_mapping[col] = 'New Applications Completed'
+            elif 'new' in col_str and 'eligible' in col_str:
+                column_mapping[col] = 'New Applications Eligible'
+            elif 'renewal' in col_str and 'received' in col_str:
+                column_mapping[col] = 'Renewals Received'
+            elif 'renewal' in col_str and 'completed' in col_str:
+                column_mapping[col] = 'Renewals Completed'
+            elif 'renewal' in col_str and 'eligible' in col_str:
+                column_mapping[col] = 'Renewals Eligible'
+            elif 'total' in col_str and 'received' in col_str:
+                column_mapping[col] = 'Total Received'
+            elif 'total' in col_str and 'completed' in col_str:
+                column_mapping[col] = 'Total Completed'
+            elif 'total' in col_str and 'eligible' in col_str:
+                column_mapping[col] = 'Total Eligible'
+        
+        # Check if we need to add any missing columns based on existing ones
+        needed_columns = set(expected_columns) - set(column_mapping.values())
+        if needed_columns:
+            print(f"Warning: Some expected columns not found. Will attempt to calculate: {needed_columns}")
+            
+            # Example: Calculate Total Received if missing but we have New and Renewals Received
+            if 'Total Received' in needed_columns and 'New Applications Received' in column_mapping.values() and 'Renewals Received' in column_mapping.values():
+                df = df.rename(columns=column_mapping)  # Apply partial renaming first
+                df['Total Received'] = pd.to_numeric(df['New Applications Received'], errors='coerce').fillna(0) + pd.to_numeric(df['Renewals Received'], errors='coerce').fillna(0)
+            
+            # Similar for other totals if needed
+            if 'Total Completed' in needed_columns and 'New Applications Completed' in column_mapping.values() and 'Renewals Completed' in column_mapping.values():
+                df = df.rename(columns=column_mapping)
+                df['Total Completed'] = pd.to_numeric(df['New Applications Completed'], errors='coerce').fillna(0) + pd.to_numeric(df['Renewals Completed'], errors='coerce').fillna(0)
+            
+            if 'Total Eligible' in needed_columns and 'New Applications Eligible' in column_mapping.values() and 'Renewals Eligible' in column_mapping.values():
+                df = df.rename(columns=column_mapping)
+                df['Total Eligible'] = pd.to_numeric(df['New Applications Eligible'], errors='coerce').fillna(0) + pd.to_numeric(df['Renewals Eligible'], errors='coerce').fillna(0)
+        
+        # Apply the column mapping
+        df = df.rename(columns=column_mapping)
+        
+        # Ensure all expected columns exist (even if they're calculated or empty)
+        for col in expected_columns:
+            if col not in df.columns:
+                df[col] = 0  # Add missing columns with zeros
+        
+        # Filter out rows where Province is 'Total'
+        if 'Province' in df.columns:
+            df = df[df['Province'].astype(str).str.lower() != 'total']
+            print(f"Shape after removing 'Total' province: {df.shape}")
+        
+        # Convert Date column to datetime format, handling errors
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            
+            # Drop rows where Date could not be converted
+            original_rows = df.shape[0]
+            df = df.dropna(subset=['Date'])
+            print(f"Dropped {original_rows - df.shape[0]} rows with invalid dates")
+        
+        # Convert numeric columns to numeric type
+        numeric_columns = [col for col in expected_columns if col not in ['Date', 'Province']]
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        
+        # Ensure Date column has unique values per province by grouping
+        # This prevents the error "arg must be a list, tuple, 1-d array, or Series"
+        if 'Province' in df.columns and 'Date' in df.columns:
+            # Convert to dictionary format first to avoid pandas data type issues
+            agg_dict = {}
+            for col in numeric_columns:
+                if col in df.columns:
+                    agg_dict[col] = 'sum'
+            
+            # Group using dictionary for aggregation
+            df = df.groupby(['Province', 'Date'], as_index=False).agg(agg_dict)
+        
+        print(f"Final shape: {df.shape}")
+        if 'Province' in df.columns:
+            print("Unique provinces:", df['Province'].unique())
+        if 'Date' in df.columns:
+            print("Date range:", df['Date'].min(), "to", df['Date'].max())
+        
+        return df
+    
+    except Exception as e:
+        print(f"Error loading applications data: {str(e)}")
+        # Add more detailed error info
+        import traceback
+        print(traceback.format_exc())
+        raise
+
+def load_and_clean_mailout_data(file_path):
+    """
+    Load and clean the mailout schedule dataset.
+    """
+    print(f"Loading mailout data from {file_path}...")
+    
+    try:
+        # Load the Excel file with explicit dtype=object to prevent type inference issues
+        mailout_df = pd.read_excel(file_path, engine='openpyxl', dtype=object)
+        
+        # Display initial information
+        print(f"Original shape: {mailout_df.shape}")
+        print("Original columns:", mailout_df.columns.tolist())
+        
+        # Check if there's a header row included as data
+        if mailout_df.iloc[0].str.contains('Date', case=False).any():
+            # Use the first row as header
+            new_headers = mailout_df.iloc[0].tolist()
+            mailout_df = mailout_df.iloc[1:].reset_index(drop=True)
+            mailout_df.columns = new_headers
+            print("Renamed columns using first row as header")
+        
+        # Find date and mailout columns
+        date_col = None
+        mailout_col = None
+        
+        for col in mailout_df.columns:
+            col_str = str(col).lower()
+            if 'date' in col_str:
+                date_col = col
+            elif 'mail' in col_str or 'out' in col_str or 'sent' in col_str or 'letter' in col_str:
+                mailout_col = col
+        
+        # Rename columns
+        column_mapping = {}
+        if date_col:
+            column_mapping[date_col] = 'Date'
+        if mailout_col:
+            column_mapping[mailout_col] = 'Mailout'
+        
+        # If we couldn't find the columns by name, assume first column is Date and second is Mailout
+        if not date_col and len(mailout_df.columns) >= 1:
+            column_mapping[mailout_df.columns[0]] = 'Date'
+        if not mailout_col and len(mailout_df.columns) >= 2:
+            column_mapping[mailout_df.columns[1]] = 'Mailout'
+        
+        # Apply the column mapping
+        mailout_df = mailout_df.rename(columns=column_mapping)
+        
+        # Ensure required columns exist
+        if 'Date' not in mailout_df.columns:
+            raise ValueError("Could not identify a Date column in the mailout data")
+        if 'Mailout' not in mailout_df.columns:
+            raise ValueError("Could not identify a Mailout column in the mailout data")
+        
+        # Convert Date column to datetime format, handling errors
+        mailout_df['Date'] = pd.to_datetime(mailout_df['Date'], errors='coerce')
+        
+        # Drop rows where Date could not be converted
+        original_rows = mailout_df.shape[0]
+        mailout_df = mailout_df.dropna(subset=['Date'])
+        print(f"Dropped {original_rows - mailout_df.shape[0]} rows with invalid dates")
+        
+        # Convert Mailout column to numeric
+        mailout_df['Mailout'] = pd.to_numeric(mailout_df['Mailout'], errors='coerce').fillna(0)
+        
+        # Ensure Date column has unique values
+        mailout_df = mailout_df.drop_duplicates(subset=['Date'])
+        
+        print(f"Final shape: {mailout_df.shape}")
+        print("Date range:", mailout_df['Date'].min(), "to", mailout_df['Date'].max())
+        
+        return mailout_df
+    
+    except Exception as e:
+        print(f"Error loading mailout data: {str(e)}")
+        # Add more detailed error info
+        import traceback
+        print(traceback.format_exc())
+        raise
+
+def handle_date_mismatch(app_df, mailout_df):
+    """
+    Handle date mismatch between applications and mailout dataframes.
+    This function extends the date range and interpolates values when necessary.
+    """
+    print("Handling date mismatch between dataframes...")
+    
+    if 'Date' not in app_df.columns or 'Date' not in mailout_df.columns:
+        raise ValueError("Both dataframes must have a 'Date' column")
+    
+    # Get the complete date range across both dataframes
+    min_date = min(app_df['Date'].min(), mailout_df['Date'].min())
+    max_date = max(app_df['Date'].max(), mailout_df['Date'].max())
+    
+    print(f"Combined date range: {min_date} to {max_date}")
+    
+    # Create a complete date range DataFrame
+    all_dates = pd.DataFrame({
+        'Date': pd.date_range(min_date, max_date, freq='D')
+    })
+    
+    # For each province in the applications data, create a complete time series
+    if 'Province' in app_df.columns:
+        provinces = app_df['Province'].unique()
+        extended_app_dfs = []
+        
+        for province in provinces:
+            # Filter data for this province
+            province_df = app_df[app_df['Province'] == province].copy()
+            
+            # Merge with all dates to create a complete time series
+            province_dates = all_dates.merge(
+                province_df, 
+                on='Date', 
+                how='left'
+            )
+            
+            # Fill Province column
+            province_dates['Province'] = province
+            
+            # Forward fill missing values for up to 7 days, then backfill
+            numeric_cols = [col for col in province_dates.columns 
+                            if col not in ['Date', 'Province']]
+            
+            # First try forward fill with a limit
+            province_dates[numeric_cols] = province_dates[numeric_cols].fillna(method='ffill', limit=7)
+            
+            # Then try backfill with a limit
+            province_dates[numeric_cols] = province_dates[numeric_cols].fillna(method='bfill', limit=7)
+            
+            # For any remaining NaN values, use linear interpolation
+            province_dates[numeric_cols] = province_dates[numeric_cols].interpolate(method='linear')
+            
+            # Add to the list of extended dataframes
+            extended_app_dfs.append(province_dates)
+        
+        # Combine all province dataframes
+        extended_app_df = pd.concat(extended_app_dfs, ignore_index=True)
+    else:
+        # If no Province column, just extend the dates
+        extended_app_df = all_dates.merge(
+            app_df,
+            on='Date',
+            how='left'
+        )
+        
+        # Interpolate numeric columns
+        numeric_cols = [col for col in extended_app_df.columns if col not in ['Date', 'Province']]
+        extended_app_df[numeric_cols] = extended_app_df[numeric_cols].interpolate(method='linear')
+    
+    # Fill any remaining NaN values with 0
+    numeric_cols = [col for col in extended_app_df.columns 
+                   if col not in ['Date', 'Province']]
+    extended_app_df[numeric_cols] = extended_app_df[numeric_cols].fillna(0)
+    
+    # Extend the mailout dataframe to cover the full date range
+    extended_mailout_df = all_dates.merge(
+        mailout_df,
+        on='Date',
+        how='left'
+    )
+    
+    # Interpolate Mailout values - handle cases with no initial values
+    if extended_mailout_df['Mailout'].notna().any():
+        extended_mailout_df['Mailout'] = extended_mailout_df['Mailout'].interpolate(method='linear')
+    else:
+        # If no mailout data, set to a reasonable default
+        extended_mailout_df['Mailout'] = 100  # Arbitrary value, replace as needed
+    
+    # Fill any remaining NaN values with 0
+    extended_mailout_df['Mailout'] = extended_mailout_df['Mailout'].fillna(0)
+    
+    # Print info about the extended dataframes
+    print(f"Extended applications data shape: {extended_app_df.shape}")
+    print(f"Extended mailout data shape: {extended_mailout_df.shape}")
+    
+    return extended_app_df, extended_mailout_df
+
+def merge_dataframes(app_df, mailout_df):
+    """
+    Merge the applications and mailout dataframes.
+    """
+    print("Merging dataframes...")
+    
+    if 'Date' not in app_df.columns or 'Date' not in mailout_df.columns:
+        raise ValueError("Both dataframes must have a 'Date' column")
+    
+    # Merge on Date
+    if 'Province' in app_df.columns:
+        # If we have a Province column, we need to add mailout data to each province
+        # First create a date-to-mailout mapping
+        date_to_mailout = mailout_df.set_index('Date')['Mailout'].to_dict()
+        
+        # Add Mailout column to app_df
+        app_df_with_mailout = app_df.copy()
+        app_df_with_mailout['Mailout'] = app_df_with_mailout['Date'].map(date_to_mailout).fillna(0)
+        
+        merged_df = app_df_with_mailout
+    else:
+        # Simple case - just merge on Date
+        merged_df = pd.merge(
+            app_df,
+            mailout_df[['Date', 'Mailout']],
+            on='Date',
+            how='left'  # Keep all rows from applications data
+        )
+        
+        # Fill any missing Mailout values with 0
+        merged_df['Mailout'] = merged_df['Mailout'].fillna(0)
+    
+    # Calculate cumulative takeup percentage
+    # Group by date to get totals across all provinces
+    date_totals_columns = ['Date', 'Total Received', 'Mailout']
+    
+    # Check if all required columns exist
+    missing_columns = [col for col in date_totals_columns if col not in merged_df.columns]
+    if missing_columns:
+        print(f"Warning: Missing columns for cumulative calculations: {missing_columns}")
+        # Add missing columns with zeros
+        for col in missing_columns:
+            merged_df[col] = 0
+    
+    # Group by date - handling the case with or without Province column
+    if 'Province' in merged_df.columns:
+        date_totals = merged_df.groupby('Date').agg({
+            'Total Received': 'sum',
+            'Mailout': 'mean'  # Use mean since mailout should be the same for all provinces on same date
+        }).reset_index()
+    else:
+        date_totals = merged_df[['Date', 'Total Received', 'Mailout']].copy()
+    
+    # Calculate cumulative sums
+    date_totals['Cumulative Received'] = date_totals['Total Received'].cumsum()
+    date_totals['Cumulative Mailout'] = date_totals['Mailout'].cumsum()
+    
+    # Calculate cumulative takeup percentage
+    date_totals['Cumulative Takeup'] = (
+        date_totals['Cumulative Received'] / 
+        date_totals['Cumulative Mailout'].replace(0, np.nan)  # Avoid division by zero
+    ) * 100
+    
+    # Fill NaN values with 0
+    date_totals['Cumulative Takeup'] = date_totals['Cumulative Takeup'].fillna(0)
+    
+    # Merge the cumulative data back to the main dataframe
+    merged_df = pd.merge(
+        merged_df,
+        date_totals[['Date', 'Cumulative Takeup', 'Cumulative Received', 'Cumulative Mailout']],
+        on='Date',
+        how='left'
+    )
+    
+    # Calculate Completed-Eligible ratio if columns exist
+    if 'Renewals Completed' in merged_df.columns and 'Renewals Eligible' in merged_df.columns:
+        merged_df['Completed_Eligible_Ratio'] = (
+            merged_df['Renewals Completed'] / 
+            merged_df['Renewals Eligible'].replace(0, np.nan)  # Avoid division by zero
+        )
+        
+        # Fill NaN values with 0
+        merged_df['Completed_Eligible_Ratio'] = merged_df['Completed_Eligible_Ratio'].fillna(0)
+    else:
+        print("Warning: Cannot calculate Completed_Eligible_Ratio due to missing columns")
+        merged_df['Completed_Eligible_Ratio'] = 0
+    
+    print(f"Merged dataframe shape: {merged_df.shape}")
+    
+    return merged_df
+
+def create_visualizations(merged_df):
+    """
+    Create visualizations of the data.
+    """
+    print("Creating visualizations...")
+    
+    # Check if necessary columns exist
+    required_columns = ['Date', 'Total Received', 'Total Completed', 'Total Eligible',
+                       'Renewals Received', 'Renewals Completed', 'Renewals Eligible',
+                       'Mailout', 'Cumulative Takeup', 'Completed_Eligible_Ratio']
+    
+    missing_columns = [col for col in required_columns if col not in merged_df.columns]
+    if missing_columns:
+        print(f"Warning: Missing columns for visualizations: {missing_columns}")
+        for col in missing_columns:
+            merged_df[col] = 0  # Add missing columns with zeros
+    
+    # Set figure size and style for all plots
+    plt.rcParams['figure.figsize'] = (14, 8)
+    plt.rcParams['font.size'] = 12
+    
+    # Helper function to format dates on x-axis
+    def format_date_axis(ax):
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+    
+    # 1. Line chart: Renewals Applications by Province and Date
+    if 'Province' in merged_df.columns:
+        renewals_provinces = []
+        for province in merged_df['Province'].unique():
+            province_data = merged_df[merged_df['Province'] == province]
+            renewals_provinces.append({
+                'Province': province,
+                'Date': province_data['Date'],
+                'Renewals Received': province_data['Renewals Received'],
+                'Renewals Completed': province_data['Renewals Completed'],
+                'Renewals Eligible': province_data['Renewals Eligible']
+            })
+        
+        for i, province_data in enumerate(renewals_provinces):
+            plt.figure()
+            plt.plot(province_data['Date'], province_data['Renewals Received'], 
+                     label='Received', linewidth=2)
+            plt.plot(province_data['Date'], province_data['Renewals Completed'], 
+                     label='Completed', linewidth=2)
+            plt.plot(province_data['Date'], province_data['Renewals Eligible'], 
+                     label='Eligible', linewidth=2)
+            
+            plt.title(f'Renewals Applications for {province_data["Province"]}')
+            plt.xlabel('Date')
+            plt.ylabel('Number of Applications')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            ax = plt.gca()
+            format_date_axis(ax)
+            
+            plt.savefig(f'renewals_by_date_{province_data["Province"]}.png', dpi=300, bbox_inches='tight')
+            plt.close()
+    else:
+        # Create a single chart if no Province column
+        plt.figure()
+        plt.plot(merged_df['Date'], merged_df['Renewals Received'], 
+                 label='Received', linewidth=2)
+        plt.plot(merged_df['Date'], merged_df['Renewals Completed'], 
+                 label='Completed', linewidth=2)
+        plt.plot(merged_df['Date'], merged_df['Renewals Eligible'], 
+                 label='Eligible', linewidth=2)
+        
+        plt.title('Renewals Applications by Date')
+        plt.xlabel('Date')
+        plt.ylabel('Number of Applications')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        ax = plt.gca()
+        format_date_axis(ax)
+        
+        plt.savefig('renewals_by_date.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    # 2. Bar chart: Renewals Applications by Province
+    if 'Province' in merged_df.columns:
+        renewals_by_province = merged_df.groupby('Province').agg({
+            'Renewals Received': 'sum',
+            'Renewals Completed': 'sum',
+            'Renewals Eligible': 'sum'
+        }).reset_index()
+        
+        plt.figure()
+        x = np.arange(len(renewals_by_province))
+        width = 0.25
+        
+        plt.bar(x - width, renewals_by_province['Renewals Received'], 
+                width, label='Received')
+        plt.bar(x, renewals_by_province['Renewals Completed'], 
+                width, label='Completed')
+        plt.bar(x + width, renewals_by_province['Renewals Eligible'], 
+                width, label='Eligible')
+        
+        plt.xlabel('Province')
+        plt.ylabel('Number of Applications')
+        plt.title('Renewals Applications by Province')
+        plt.xticks(x, renewals_by_province['Province'], rotation=45)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        plt.savefig('renewals_by_province.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    # 3. Line chart: Completed-Eligible Ratio over time (averaged across provinces)
+    if 'Province' in merged_df.columns:
+        completed_eligible_ratio = merged_df.groupby('Date').agg({
+            'Completed_Eligible_Ratio': 'mean'
+        }).reset_index()
+    else:
+        completed_eligible_ratio = merged_df[['Date', 'Completed_Eligible_Ratio']].copy()
+    
+    plt.figure()
+    plt.plot(completed_eligible_ratio['Date'], 
+             completed_eligible_ratio['Completed_Eligible_Ratio'], 
+             linewidth=2)
+    
+    plt.title('Completed/Eligible Ratio Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Ratio')
+    plt.grid(True, alpha=0.3)
+    
+    ax = plt.gca()
+    format_date_axis(ax)
+    
+    plt.savefig('completed_eligible_ratio.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 4. Line charts for total applications over time
+    # Group by date to get totals across provinces if Province column exists
+    if 'Province' in merged_df.columns:
+        totals_by_date = merged_df.groupby('Date').agg({
+            'Total Received': 'sum',
+            'Total Completed': 'sum',
+            'Total Eligible': 'sum'
+        }).reset_index()
+    else:
+        totals_by_date = merged_df[['Date', 'Total Received', 'Total Completed', 'Total Eligible']].copy()
+    
+    # Total Received over time
+    plt.figure()
+    plt.plot(totals_by_date['Date'], totals_by_date['Total Received'], 
+             linewidth=2)
+    
+    plt.title('Total Applications Received Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Number of Applications')
+    plt.grid(True, alpha=0.3)
+    
+    ax = plt.gca()
+    format_date_axis(ax)
+    
+    plt.savefig('total_received.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Total Completed over time
+    plt.figure()
+    plt.plot(totals_by_date['Date'], totals_by_date['Total Completed'], 
+             linewidth=2)
+    
+    plt.title('Total Applications Completed Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Number of Applications')
+    plt.grid(True, alpha=0.3)
+    
+    ax = plt.gca()
+    format_date_axis(ax)
+    
+    plt.savefig('total_completed.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Total Eligible over time
+    plt.figure()
+    plt.plot(totals_by_date['Date'], totals_by_date['Total Eligible'], 
+             linewidth=2)
+    
+    plt.title('Total Applications Eligible Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Number of Applications')
+    plt.grid(True, alpha=0.3)
+    
+    ax = plt.gca()
+    format_date_axis(ax)
+    
+    plt.savefig('total_eligible.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 5. Comparison chart: Total Received vs Mailout
+    # Prepare data based on whether Province column exists
+    if 'Province' in merged_df.columns:
+        received_vs_mailout = merged_df.groupby('Date').agg({
+            'Total Received': 'sum',
+            'Mailout': 'first'  # Mailout is the same for all provinces on a given date
+        }).reset_index()
+    else:
+        received_vs_mailout = merged_df[['Date', 'Total Received', 'Mailout']].copy()
+    
+    plt.figure()
+    plt.plot(received_vs_mailout['Date'], received_vs_mailout['Total Received'], 
+             label='Total Applications Received', linewidth=2)
+    plt.plot(received_vs_mailout['Date'], received_vs_mailout['Mailout'], 
+             label='Mailout Letters Sent', linewidth=2, linestyle='--')
+    
+    plt.title('Comparison of Mailout Letters Sent and Total Applications Received')
+    plt.xlabel('Date')
+    plt.ylabel('Count')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    ax = plt.gca()
+    format_date_axis(ax)
+    
+    plt.savefig('received_vs_mailout.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 6. Cumulative Takeup Percentage over time
+    # Prepare data based on whether Province column exists
+    if 'Province' in merged_df.columns:
+        takeup_by_date = merged_df.groupby('Date').agg({
+            'Cumulative Takeup': 'first'  # Same for all provinces on a given date
+        }).reset_index()
+    else:
+        takeup_by_date = merged_df[['Date', 'Cumulative Takeup']].copy()
+    
+    plt.figure()
+    plt.plot(takeup_by_date['Date'], takeup_by_date['Cumulative Takeup'], 
+             linewidth=2)
+    
+    plt.title('Cumulative Takeup Percentage Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Takeup Percentage (%)')
+    plt.grid(True, alpha=0.3)
+    
+    ax = plt.gca()
+    format_date_axis(ax)
+    
+    plt.savefig('cumulative_takeup.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print("Visualizations created and saved.")
+
+def main():
+    """
+    Main function to execute the analysis pipeline.
+    """
+    print("Starting data analysis pipeline...")
+    
+    try:
+        # 1. Load and clean the applications data
+        app_df = load_and_clean_applications_data('Applications_Renewals_by_Date_20250414.xlsx')
+        
+        # 2. Load and clean the mailout data
+        mailout_df = load_and_clean_mailout_data('Mailout_Schedule.xlsx')
+        
+        # 3. Handle date mismatch
+        app_df_extended, mailout_df_extended = handle_date_mismatch(app_df, mailout_df)
+        
+        # 4. Merge dataframes
+        merged_df = merge_dataframes(app_df_extended, mailout_df_extended)
+        
+        # 5. Create visualizations
+        create_visualizations(merged_df)
+        
+        # 6. Save the processed data
+        merged_df.to_csv('processed_applications_data.csv', index=False)
+        print("Analysis completed successfully. Processed data saved to 'processed_applications_data.csv'")
+        
+    except Exception as e:
+        print(f"Error in analysis pipeline: {str(e)}")
+        # Add more detailed error info
+        import traceback
+        print(traceback.format_exc())
+
+if __name__ == "__main__":
+    main()
