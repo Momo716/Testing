@@ -143,6 +143,7 @@ def extract_call_volumes(file_path, target_date=None):
 def extract_application_volumes(file_path, target_date=None):
     """
     Extract application volume data from the applications volume file.
+    Based on the clearer image of the applications dataset structure.
     
     Args:
         file_path: Path to the applications volume Excel file
@@ -154,128 +155,80 @@ def extract_application_volumes(file_path, target_date=None):
     print(f"Reading applications volume file: {file_path}")
     
     try:
-        # Read the Excel file
-        df = pd.read_excel(file_path, sheet_name="Sheet1")
+        # Read the Excel file - specifically setting header=2 (which means row 3 in Excel)
+        df = pd.read_excel(file_path, sheet_name="Sheet1", header=2)
         
-        # Debug: Display first few rows of the DataFrame
-        print("First few rows of applications file:")
+        # Debug: Display first few rows and columns
+        print("First few rows of applications file (with header at row 3):")
         print(df.head(2))
         print("Columns:", df.columns.tolist())
         
-        # Look for receive and type columns - be more flexible in detection
+        # From the image, we can see the exact column structure:
+        # - Column A: "Date"
+        # - Column C: "Received"
+        # - Column F: "Type"
+        
+        # Try to identify these columns by name first
+        date_col = None
         receive_col = None
         type_col = None
         
-        # Try to identify columns by column header text
         for col in df.columns:
             col_str = str(col).lower()
-            # Check for receive column
-            if "receive" in col_str or "recu" in col_str:
+            if col_str == "date":
+                date_col = col
+            elif col_str == "received":
                 receive_col = col
-                print(f"Found receive column: {col}")
-            # Check for type column
-            elif "type" in col_str or "type" == col_str:
+            elif col_str == "type":
                 type_col = col
-                print(f"Found type column: {col}")
         
-        # If still not found, use positional fallbacks (from image 4)
-        if receive_col is None and len(df.columns) > 1:
-            receive_col = df.columns[1]  # Column B
+        # If not found by exact name, try positional matching based on the image
+        if date_col is None and len(df.columns) > 0:
+            date_col = df.columns[0]  # Column A
+            print(f"Using positional fallback for date column: {date_col}")
+        
+        if receive_col is None and len(df.columns) > 2:
+            receive_col = df.columns[2]  # Column C
             print(f"Using positional fallback for receive column: {receive_col}")
         
-        if type_col is None and len(df.columns) > 4:
-            type_col = df.columns[4]  # Column E
+        if type_col is None and len(df.columns) > 5:
+            type_col = df.columns[5]  # Column F
             print(f"Using positional fallback for type column: {type_col}")
         
-        print(f"Using columns: '{receive_col}' for Receive, '{type_col}' for Type")
+        print(f"Using columns: '{date_col}' for Date, '{receive_col}' for Receive, '{type_col}' for Type")
         
-        # Display a sample of values in the type column to aid debugging
-        print("Sample values in Type column:")
-        type_sample = df[type_col].dropna().unique()[:5]  # Show up to 5 unique values
-        for val in type_sample:
-            print(f"  - {val}")
+        # Make sure the date column is in datetime format
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
         
-        # Check if the applications file has a date column
-        date_col = None
-        for col in df.columns:
-            if str(col).lower() in ['date', 'day']:
-                date_col = col
-                print(f"Found date column in applications file: {col}")
-                break
+        # Filter to target date if specified
+        if target_date:
+            target_dt = pd.to_datetime(target_date)
+            df = df[df[date_col].dt.date == target_dt.date()]
+            if df.empty:
+                print(f"WARNING: No data found for target date {target_date}")
+                return None
         
-        # If no specific date column found, assume the data is all for the target date or yesterday
-        if not date_col:
-            process_date = target_date if target_date else (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        # Process data by date
+        results = {}
+        # Group by date
+        for date, group in df.groupby(df[date_col].dt.date):
+            date_str = date.strftime('%Y-%m-%d')
             
-            # Sum applications for New Applications - make the matching more robust
-            new_apps_df = df[df[type_col].astype(str).str.contains("New", case=False, na=False) & 
-                              df[type_col].astype(str).str.contains("Application", case=False, na=False)]
-            
-            # If no matches found, try a simpler search
-            if len(new_apps_df) == 0:
-                print("Warning: No exact matches for 'New Applications', trying simplified search")
-                new_apps_df = df[df[type_col].astype(str).str.contains("New", case=False, na=False)]
-            
+            # Sum applications for New Applications
+            new_apps_df = group[group[type_col] == "New Applications"]
             applications_18_64_new = new_apps_df[receive_col].sum()
             
-            # Sum applications for Renewals - make the matching more robust
-            renewals_df = df[df[type_col].astype(str).str.contains("Renewal", case=False, na=False)]
+            # Sum applications for Renewals
+            renewals_df = group[group[type_col] == "Renewals"]
             applications_18_64_renewals = renewals_df[receive_col].sum()
             
-            # Debug - count entries in each category
-            print(f"New Applications entries: {len(new_apps_df)}")
-            print(f"Renewals entries: {len(renewals_df)}")
+            print(f"Applications for {date_str}:")
+            print(f"  - New Applications ({len(new_apps_df)} rows): {applications_18_64_new}")
+            print(f"  - Renewals ({len(renewals_df)} rows): {applications_18_64_renewals}")
             
-            print(f"Applications for {process_date}:")
-            print(f"  - New Applications: {applications_18_64_new}")
-            print(f"  - Renewals: {applications_18_64_renewals}")
-            
-            # Return with the process date
-            return {process_date: (applications_18_64_new, applications_18_64_renewals)}
-        else:
-            # If we have a date column, process by date
-            results = {}
-            
-            # Convert date column to datetime
-            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-            
-            # Filter to target date if specified
-            if target_date:
-                target_dt = pd.to_datetime(target_date)
-                df_filtered = df[df[date_col].dt.date == target_dt.date()]
-                if df_filtered.empty:
-                    print(f"Warning: No data found for target date {target_date}")
-                    # Fall back to using all data
-                    df_filtered = df
-                else:
-                    df = df_filtered
-            
-            # Group by date
-            for date, group in df.groupby(df[date_col].dt.date):
-                date_str = date.strftime('%Y-%m-%d')
-                
-                # Sum applications for New Applications
-                new_apps_df = group[group[type_col].astype(str).str.contains("New", case=False, na=False) & 
-                                    group[type_col].astype(str).str.contains("Application", case=False, na=False)]
-                
-                # If no matches found, try a simpler search
-                if len(new_apps_df) == 0:
-                    print(f"Warning: No exact matches for 'New Applications' on {date_str}, trying simplified search")
-                    new_apps_df = group[group[type_col].astype(str).str.contains("New", case=False, na=False)]
-                
-                applications_18_64_new = new_apps_df[receive_col].sum()
-                
-                # Sum applications for Renewals
-                renewals_df = group[group[type_col].astype(str).str.contains("Renewal", case=False, na=False)]
-                applications_18_64_renewals = renewals_df[receive_col].sum()
-                
-                print(f"Applications for {date_str}:")
-                print(f"  - New Applications: {applications_18_64_new}")
-                print(f"  - Renewals: {applications_18_64_renewals}")
-                
-                results[date_str] = (applications_18_64_new, applications_18_64_renewals)
-            
-            return results
+            results[date_str] = (applications_18_64_new, applications_18_64_renewals)
+        
+        return results
         
     except Exception as e:
         print(f"Error extracting application volumes: {str(e)}")
@@ -304,16 +257,7 @@ def calculate_calling_rates(call_data, app_data):
             print("\nWARNING: No common dates found between call data and application data")
             print("Call data dates:", sorted(list(call_data.keys())))
             print("App data dates:", sorted(list(app_data.keys())))
-            
-            # If the application data doesn't have dates but we have call dates,
-            # assume the app data applies to all call dates
-            if len(app_data) == 1 and len(call_data) > 0:
-                app_date = list(app_data.keys())[0]
-                app_values = app_data[app_date]
-                common_dates = set(call_data.keys())
-                for date in common_dates:
-                    app_data[date] = app_values
-                print(f"Applied application data from {app_date} to all call dates: {sorted(list(common_dates))}")
+            return None
         
         for date in sorted(common_dates):
             call_volumes_18_64, sum_calls_except_18_64 = call_data[date]
@@ -468,7 +412,7 @@ def main():
         print("ERROR: Failed to extract call volume data.")
         return
     
-    # Extract application volume data - this is your "applications_volume_file.xlsx"
+    # Extract application volume data
     if process_type == "1":
         # Process all historical data
         app_data = extract_application_volumes(applications_volume_path)
