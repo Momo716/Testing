@@ -265,6 +265,7 @@ def calculate_calling_rates(call_data, app_data):
             
             print(f"\nCalculating rates for {date}:")
             print(f"  Call volumes 18-64: {call_volumes_18_64}")
+            print(f"  Sum calls except 18-64: {sum_calls_except_18_64}")
             print(f"  Applications new: {applications_18_64_new}")
             print(f"  Applications renewals: {applications_18_64_renewals}")
             
@@ -275,18 +276,16 @@ def calculate_calling_rates(call_data, app_data):
             else:
                 print(f"  Warning: Zero applications for new (18-64) for {date}")
             
-            # NEW FORMULA: Calculate calling rate for renewals using 18-64 calls
-            # Instead of using sum_calls_except_18_64
+            # Calculate calling rate for renewals
             calling_rate_renewals = 0
             if applications_18_64_renewals > 0:
-                # Using call_volumes_18_64 instead of sum_calls_except_18_64 for the new formula
-                calling_rate_renewals = call_volumes_18_64 / applications_18_64_renewals
+                calling_rate_renewals = sum_calls_except_18_64 / applications_18_64_renewals
             else:
                 print(f"  Warning: Zero applications for renewals for {date}")
             
             print(f"  Calculated calling rates for {date}:")
             print(f"    - New Applications: {calling_rate_new:.4f}")
-            print(f"    - Renewals (NEW FORMULA): {calling_rate_renewals:.4f}")
+            print(f"    - Renewals: {calling_rate_renewals:.4f}")
             
             results[date] = (calling_rate_new, calling_rate_renewals)
         
@@ -437,8 +436,10 @@ def main():
     
     if success:
         print("\n✅ SUCCESS: Calling rates have been calculated and saved.")
-        print("    - New Applications Rate: Call Volumes for 18-64 age groups / Applications for 18-64 (New Applications)")
-        print("    - Renewals Rate (NEW FORMULA): Call Volumes for 18-64 age groups / Applications for 18-64 (Renewals)")
+        print("    - New Applications Rate: Call Volumes for 18-64 age groups (sum of rows 53, 54, 55)")
+        print("                            divided by Applications for 18-64 (New Applications)")
+        print("    - Renewals Rate: Sum of calls for other age groups (rows 42-48 + row 56)")
+        print("                    divided by Applications for 18-64 (Renewals)")
         print("\nPlease verify the output file to ensure the rates look correct.")
     else:
         print("\n❌ ERROR: Failed to complete the calculation.")
