@@ -1,4 +1,3 @@
-```python
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -9,7 +8,6 @@ from openpyxl.utils import get_column_letter
 def extract_call_volumes(file_path):
     """
     Extract call volume data from the call volume file.
-    Now specifically targets the three age groups in rows 53, 54, and 55.
     
     Args:
         file_path: Path to the call volume Excel file
@@ -26,19 +24,50 @@ def extract_call_volumes(file_path):
         
         # Initialize variables
         call_volumes_18_64 = 0  
-        sum_calls_except_18_64 = None
-        age_groups_data = []
+        sum_calls_except_18_64 = 0  # Initialize to 0 since we'll calculate this
+        age_groups_18_64 = []
+        other_age_groups = []
+        
+        # Based on the screenshot, we need to find the "YTD/AAJ" column
+        ytd_column = None
+        for col in range(1, sheet.max_column + 1):
+            if str(sheet.cell(row=1, column=col).value).upper() == "YTD/AAJ":
+                ytd_column = col
+                break
+        
+        # If not found, check row 4 which also appears to have headers
+        if ytd_column is None:
+            for col in range(1, sheet.max_column + 1):
+                if str(sheet.cell(row=4, column=col).value).upper() == "YTD/AAJ":
+                    ytd_column = col
+                    break
+                elif str(sheet.cell(row=4, column=col).value).upper() == "TRACKED / SUIVIS %":
+                    # The YTD/AAJ is usually before the percentage column
+                    ytd_column = col - 1
+                    break
+        
+        # If still not found, use a fixed column (from screenshot it appears to be column D or E)
+        if ytd_column is None:
+            ytd_column = 5  # Try column E as a fallback
+            print("WARNING: Could not find YTD/AAJ column, using column E as fallback")
+        else:
+            print(f"Found YTD/AAJ column at position {ytd_column}")
         
         # Define the specific rows containing the 18-64 age groups
-        # Based on the image, these are rows 53, 54, and 55 
-        # The column with values appears to be column AA (or 27 in 0-based index)
-        age_group_rows = [53, 54, 55]
-        value_column = 27  # Column AA (adjust if needed for your file)
+        # From screenshot: rows 53, 54, and 55
+        age_group_18_64_rows = [53, 54, 55]
         
-        # Extract values from the specific age group rows
-        for row in age_group_rows:
-            cell_value = sheet.cell(row=row, column=value_column).value
-            label = sheet.cell(row=row, column=3).value  # Column C with description (adjust if needed)
+        # Define rows to exclude (crossed out rows)
+        excluded_rows = [49, 50, 51, 52]
+        
+        # Define the other age groups (all relevant rows except 18-64 and crossed out)
+        # Based on the screenshot, these include rows 42-48 plus row 56
+        other_age_group_rows = list(range(42, 49)) + [56]
+        
+        # Extract values from the 18-64 age group rows
+        for row in age_group_18_64_rows:
+            cell_value = sheet.cell(row=row, column=ytd_column).value
+            label = sheet.cell(row=row, column=3).value  # Column C with description
             
             if cell_value is not None:
                 # Convert to float if it's a string with commas
@@ -47,40 +76,32 @@ def extract_call_volumes(file_path):
                 
                 if isinstance(cell_value, (int, float)) and cell_value > 0:
                     call_volumes_18_64 += cell_value
-                    age_groups_data.append((label, cell_value))
+                    age_groups_18_64.append((label, cell_value))
+        
+        # Extract values from the other age group rows to calculate sum_calls_except_18_64
+        for row in other_age_group_rows:
+            cell_value = sheet.cell(row=row, column=ytd_column).value
+            label = sheet.cell(row=row, column=3).value  # Column C with description
+            
+            if cell_value is not None:
+                # Convert to float if it's a string with commas
+                if isinstance(cell_value, str):
+                    cell_value = float(cell_value.replace(',', ''))
+                
+                if isinstance(cell_value, (int, float)) and cell_value > 0:
+                    sum_calls_except_18_64 += cell_value
+                    other_age_groups.append((label, cell_value))
         
         # Print the found age groups and their values
         print(f"Found age groups for 18-64:")
-        for label, value in age_groups_data:
+        for label, value in age_groups_18_64:
             print(f"  - {label}: {value}")
         print(f"Total call volumes for 18-64: {call_volumes_18_64}")
         
-        # Find the sum of calls for all age groups except 18-64
-        # This is typically a pre-calculated value somewhere in the sheet
-        # Common pattern to search for this value
-        sum_found = False
-        for row in range(1, sheet.max_row + 1):
-            row_text = ""
-            for col in range(1, 10):  # Check first 10 columns
-                cell_value = sheet.cell(row=row, column=col).value
-                if cell_value:
-                    row_text += str(cell_value) + " "
-            
-            # Look for a row that mentions sum of calls except 18-64
-            if "sum of calls" in row_text.lower() and "except 18-64" in row_text.lower():
-                for col in range(1, sheet.max_column + 1):
-                    cell_value = sheet.cell(row=row, column=col).value
-                    if isinstance(cell_value, (int, float)) and cell_value > 0:
-                        sum_calls_except_18_64 = cell_value
-                        sum_found = True
-                        print(f"Found sum of calls except 18-64: {sum_calls_except_18_64}")
-                        break
-                if sum_found:
-                    break
-        
-        # If we couldn't find the pre-calculated sum, provide a warning
-        if not sum_found:
-            print("WARNING: Could not find pre-calculated sum of calls except 18-64")
+        print(f"\nCalculated sum of calls except 18-64:")
+        for label, value in other_age_groups:
+            print(f"  - {label}: {value}")
+        print(f"Total call volumes except 18-64: {sum_calls_except_18_64}")
         
         return call_volumes_18_64, sum_calls_except_18_64
         
@@ -277,7 +298,7 @@ def main():
         print("\n✅ SUCCESS: Daily calling rates have been calculated and saved.")
         print("    - New Applications Rate: Call Volumes for 18-64 age groups (sum of rows 53, 54, 55)")
         print("                            divided by Applications for 18-64 (New Applications)")
-        print("    - Renewals Rate: Sum of calls except 18-64")
+        print("    - Renewals Rate: Sum of calls for all other age groups (rows 42-48 + row 56)")
         print("                    divided by Applications for 18-64 (Renewals)")
     else:
         print("\n❌ ERROR: Failed to update the output file.")
