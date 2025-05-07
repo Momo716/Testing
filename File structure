@@ -71,8 +71,8 @@ def extract_call_volumes(file_path, target_date=None):
             # Define rows to exclude (crossed out rows 49, 50, 51, 52)
             excluded_rows = [49, 50, 51, 52]
             
-            # Define the other age groups (rows 42-48 plus row 56)
-            other_age_group_rows = list(range(42, 49)) + [56]
+            # Define the other age groups (rows 42-48, REMOVED row 56 "Not Applicable / Unknown")
+            other_age_group_rows = list(range(42, 49))  # Only includes rows 42-48
             
             # Initialize counters for this date
             call_volumes_18_64 = 0
@@ -142,17 +142,16 @@ def extract_call_volumes(file_path, target_date=None):
 
 def extract_application_volumes(file_path, target_date=None):
     """
-    Extract application volume data from the applications volume file.
-    Based on the clearer image of the applications dataset structure.
+    Extract application volume data for RENEWALS from the applications volume file.
     
     Args:
         file_path: Path to the applications volume Excel file
         target_date: Optional specific date to extract data for (format: 'YYYY-MM-DD')
     
     Returns:
-        Dictionary with dates as keys and tuples of (applications_18_64_new, applications_18_64_renewals) as values
+        Dictionary with dates as keys and renewals applications values
     """
-    print(f"Reading applications volume file: {file_path}")
+    print(f"Reading applications volume file for RENEWALS: {file_path}")
     
     try:
         # Read the Excel file - specifically setting header=2 (which means row 3 in Excel)
@@ -208,7 +207,97 @@ def extract_application_volumes(file_path, target_date=None):
                 print(f"WARNING: No data found for target date {target_date}")
                 return None
         
-        # Process data by date
+        # Process data by date - ONLY FOR RENEWALS
+        results = {}
+        # Group by date
+        for date, group in df.groupby(df[date_col].dt.date):
+            date_str = date.strftime('%Y-%m-%d')
+            
+            # Sum applications for Renewals
+            renewals_df = group[group[type_col] == "Renewals"]
+            applications_renewals = renewals_df[receive_col].sum()
+            
+            print(f"Applications for {date_str}:")
+            print(f"  - Renewals ({len(renewals_df)} rows): {applications_renewals}")
+            
+            results[date_str] = applications_renewals
+        
+        return results
+        
+    except Exception as e:
+        print(f"Error extracting renewals application volumes: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def extract_new_applications_volumes(file_path, target_date=None):
+    """
+    Extract application volume data for NEW APPLICATIONS from the third dataset.
+    
+    Args:
+        file_path: Path to the new applications volume Excel file
+        target_date: Optional specific date to extract data for (format: 'YYYY-MM-DD')
+    
+    Returns:
+        Dictionary with dates as keys and new applications values
+    """
+    print(f"Reading dedicated NEW APPLICATIONS volume file: {file_path}")
+    
+    try:
+        # Read the Excel file - specifically setting header=2 (which means row 3 in Excel)
+        df = pd.read_excel(file_path, sheet_name="Sheet1", header=2)
+        
+        # Debug: Display first few rows and columns
+        print("First few rows of new applications file (with header at row 3):")
+        print(df.head(2))
+        print("Columns:", df.columns.tolist())
+        
+        # From the image, we can see the exact column structure:
+        # - Column A: "Date"
+        # - Column C: "Received"
+        # - Column F: "Type"
+        
+        # Try to identify these columns by name first
+        date_col = None
+        receive_col = None
+        type_col = None
+        
+        for col in df.columns:
+            col_str = str(col).lower()
+            if col_str == "date":
+                date_col = col
+            elif col_str == "received":
+                receive_col = col
+            elif col_str == "type":
+                type_col = col
+        
+        # If not found by exact name, try positional matching based on the image
+        if date_col is None and len(df.columns) > 0:
+            date_col = df.columns[0]  # Column A
+            print(f"Using positional fallback for date column: {date_col}")
+        
+        if receive_col is None and len(df.columns) > 2:
+            receive_col = df.columns[2]  # Column C
+            print(f"Using positional fallback for receive column: {receive_col}")
+        
+        if type_col is None and len(df.columns) > 5:
+            type_col = df.columns[5]  # Column F
+            print(f"Using positional fallback for type column: {type_col}")
+        
+        print(f"Using columns: '{date_col}' for Date, '{receive_col}' for Receive, '{type_col}' for Type")
+        
+        # Make sure the date column is in datetime format
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        
+        # Filter to target date if specified
+        if target_date:
+            target_dt = pd.to_datetime(target_date)
+            df = df[df[date_col].dt.date == target_dt.date()]
+            if df.empty:
+                print(f"WARNING: No data found for target date {target_date}")
+                return None
+        
+        # Process data by date - ONLY FOR NEW APPLICATIONS
         results = {}
         # Group by date
         for date, group in df.groupby(df[date_col].dt.date):
@@ -216,33 +305,29 @@ def extract_application_volumes(file_path, target_date=None):
             
             # Sum applications for New Applications
             new_apps_df = group[group[type_col] == "New Applications"]
-            applications_18_64_new = new_apps_df[receive_col].sum()
+            applications_new = new_apps_df[receive_col].sum()
             
-            # Sum applications for Renewals
-            renewals_df = group[group[type_col] == "Renewals"]
-            applications_18_64_renewals = renewals_df[receive_col].sum()
+            print(f"New Applications for {date_str}:")
+            print(f"  - New Applications ({len(new_apps_df)} rows): {applications_new}")
             
-            print(f"Applications for {date_str}:")
-            print(f"  - New Applications ({len(new_apps_df)} rows): {applications_18_64_new}")
-            print(f"  - Renewals ({len(renewals_df)} rows): {applications_18_64_renewals}")
-            
-            results[date_str] = (applications_18_64_new, applications_18_64_renewals)
+            results[date_str] = applications_new
         
         return results
         
     except Exception as e:
-        print(f"Error extracting application volumes: {str(e)}")
+        print(f"Error extracting new applications volumes: {str(e)}")
         import traceback
         traceback.print_exc()
         return None
 
-def calculate_calling_rates(call_data, app_data):
+def calculate_calling_rates(call_data, renewals_data, new_apps_data):
     """
     Calculate the calling rates based on the extracted data.
     
     Args:
         call_data: Dictionary with dates as keys and (call_volumes_18_64, sum_calls_except_18_64) as values
-        app_data: Dictionary with dates as keys and (applications_18_64_new, applications_18_64_renewals) as values
+        renewals_data: Dictionary with dates as keys and applications_renewals as values
+        new_apps_data: Dictionary with dates as keys and applications_new as values
     
     Returns:
         Dictionary with dates as keys and (calling_rate_new, calling_rate_renewals) as values
@@ -250,42 +335,49 @@ def calculate_calling_rates(call_data, app_data):
     try:
         results = {}
         
-        # Find common dates in both datasets
-        common_dates = set(call_data.keys()).intersection(set(app_data.keys()))
+        # Find common dates across all three datasets
+        call_dates = set(call_data.keys())
+        renewals_dates = set(renewals_data.keys())
+        new_apps_dates = set(new_apps_data.keys())
+        
+        common_dates = call_dates.intersection(renewals_dates).intersection(new_apps_dates)
         
         if not common_dates:
-            print("\nWARNING: No common dates found between call data and application data")
-            print("Call data dates:", sorted(list(call_data.keys())))
-            print("App data dates:", sorted(list(app_data.keys())))
+            print("\nWARNING: No common dates found across all three datasets")
+            print("Call data dates:", sorted(list(call_dates)))
+            print("Renewals data dates:", sorted(list(renewals_dates)))
+            print("New Applications data dates:", sorted(list(new_apps_dates)))
             return None
         
         for date in sorted(common_dates):
             call_volumes_18_64, sum_calls_except_18_64 = call_data[date]
-            applications_18_64_new, applications_18_64_renewals = app_data[date]
+            applications_renewals = renewals_data[date]
+            applications_new = new_apps_data[date]
             
             print(f"\nCalculating rates for {date}:")
             print(f"  Call volumes 18-64: {call_volumes_18_64}")
             print(f"  Sum calls except 18-64: {sum_calls_except_18_64}")
-            print(f"  Applications new: {applications_18_64_new}")
-            print(f"  Applications renewals: {applications_18_64_renewals}")
+            print(f"  Applications new: {applications_new}")
+            print(f"  Applications renewals: {applications_renewals}")
             
             # Calculate calling rate for new applications
             calling_rate_new = 0
-            if applications_18_64_new > 0:
-                calling_rate_new = call_volumes_18_64 / applications_18_64_new
+            if applications_new > 0:
+                calling_rate_new = call_volumes_18_64 / applications_new
             else:
                 print(f"  Warning: Zero applications for new (18-64) for {date}")
             
-            # Calculate calling rate for renewals
+            # OLD FORMULA: Calculate calling rate for renewals
             calling_rate_renewals = 0
-            if applications_18_64_renewals > 0:
-                calling_rate_renewals = sum_calls_except_18_64 / applications_18_64_renewals
+            if applications_renewals > 0:
+                # Using sum_calls_except_18_64 for the original formula
+                calling_rate_renewals = sum_calls_except_18_64 / applications_renewals
             else:
                 print(f"  Warning: Zero applications for renewals for {date}")
             
             print(f"  Calculated calling rates for {date}:")
             print(f"    - New Applications: {calling_rate_new:.4f}")
-            print(f"    - Renewals: {calling_rate_renewals:.4f}")
+            print(f"    - Renewals (ORIGINAL FORMULA): {calling_rate_renewals:.4f}")
             
             results[date] = (calling_rate_new, calling_rate_renewals)
         
@@ -391,7 +483,8 @@ def main():
     """Main function to run the daily calling rate calculation."""
     # File paths - UPDATE THESE WITH YOUR ACTUAL PATHS
     call_volume_path = "path/to/call_volume_file.xlsx"
-    applications_volume_path = "path/to/applications_volume_file.xlsx"
+    renewals_app_path = "path/to/renewals_applications_file.xlsx"  # Renamed to clarify purpose
+    new_app_path = "path/to/new_applications_file.xlsx"  # New third dataset
     output_path = "path/to/output_file.xlsx"
     
     print(f"Starting calling rate calculation...")
@@ -412,21 +505,34 @@ def main():
         print("ERROR: Failed to extract call volume data.")
         return
     
-    # Extract application volume data
+    # Extract RENEWALS application volumes
     if process_type == "1":
         # Process all historical data
-        app_data = extract_application_volumes(applications_volume_path)
+        renewals_data = extract_application_volumes(renewals_app_path)
     else:
         # Process just yesterday's data
         yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-        app_data = extract_application_volumes(applications_volume_path, yesterday)
+        renewals_data = extract_application_volumes(renewals_app_path, yesterday)
     
-    if not app_data:
-        print("ERROR: Failed to extract application volume data.")
+    if not renewals_data:
+        print("ERROR: Failed to extract renewals application data.")
         return
     
-    # Calculate rates
-    rate_data = calculate_calling_rates(call_data, app_data)
+    # Extract NEW application volumes from the third dataset
+    if process_type == "1":
+        # Process all historical data
+        new_apps_data = extract_new_applications_volumes(new_app_path)
+    else:
+        # Process just yesterday's data
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        new_apps_data = extract_new_applications_volumes(new_app_path, yesterday)
+    
+    if not new_apps_data:
+        print("ERROR: Failed to extract new applications data.")
+        return
+    
+    # Calculate rates using all three datasets
+    rate_data = calculate_calling_rates(call_data, renewals_data, new_apps_data)
     if not rate_data:
         print("ERROR: Failed to calculate calling rates.")
         return
@@ -436,28 +542,13 @@ def main():
     
     if success:
         print("\n✅ SUCCESS: Calling rates have been calculated and saved.")
-        print("    - New Applications Rate: Call Volumes for 18-64 age groups (sum of rows 53, 54, 55)")
-        print("                            divided by Applications for 18-64 (New Applications)")
-        print("    - Renewals Rate: Sum of calls for other age groups (rows 42-48 + row 56)")
-        print("                    divided by Applications for 18-64 (Renewals)")
+        print("    - New Applications Rate: Call Volumes for 18-64 age groups / New Applications for 18-64")
+        print("    - Renewals Rate (ORIGINAL FORMULA): Sum of calls for all age groups except 18-64")
+        print("                                        (excluding 'Not Applicable / Unknown')")
+        print("                                        divided by Applications for Renewals")
         print("\nPlease verify the output file to ensure the rates look correct.")
     else:
         print("\n❌ ERROR: Failed to complete the calculation.")
 
 if __name__ == "__main__":
     main()
-
-## Excel Output File: Calling Rates Summary
-
-This Excel file contains daily calling rates calculated from the call volume and applications data files.
-
-## Contents
-- **Date**: The specific date for each calculation
-- **Calling Rate New Applications**: Ratio of 18-64 age group calls to new applications
-- **Calling Rate Renewals**: Ratio of 18-64 age group calls to renewal applications
-
-## Formulas Used
-1. **New Applications Rate** = Calls from 18-64 age group ÷ New Applications for 18-64 age group
-2. **Renewals Rate** = Calls from 18-64 age group ÷ Renewal Applications for 18-64 age group
-
-These rates measure how many calls are received per application within the 18-64 demographic, allowing direct comparison between new application and renewal calling behaviors.​​​​​​​​​​​​​​​​
