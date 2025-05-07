@@ -1,0 +1,149 @@
+```python
+import pandas as pd
+import numpy as np
+import sys
+import os
+from openpyxl import load_workbook
+from collections import Counter
+
+# ======================================================================
+# SPECIFY YOUR EXCEL FILE PATH HERE
+# Example: file_path = "C:/Users/YourName/Documents/data.xlsx"
+# ======================================================================
+file_path = "your_excel_file.xlsx"  # <-- EDIT THIS LINE with your file path
+# ======================================================================
+
+def analyze_excel_structure(file_path):
+    """
+    Analyze the structure of an Excel file and output a detailed summary.
+    Works with multi-sheet Excel files and provides comprehensive information
+    about the structure and content.
+    """
+    if not os.path.exists(file_path):
+        print(f"Error: File '{file_path}' not found.")
+        return
+    
+    print(f"\n{'='*80}")
+    print(f"ANALYZING EXCEL FILE: {os.path.basename(file_path)}")
+    print(f"{'='*80}")
+    
+    # Load the Excel file with openpyxl to get sheet info
+    try:
+        workbook = load_workbook(file_path, read_only=True, data_only=True)
+        sheet_names = workbook.sheetnames
+        print(f"\nFile contains {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+    except Exception as e:
+        print(f"Error reading workbook structure: {str(e)}")
+        # Fall back to pandas if openpyxl fails
+        try:
+            excel_file = pd.ExcelFile(file_path)
+            sheet_names = excel_file.sheet_names
+            print(f"\nFile contains {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+        except Exception as e:
+            print(f"Critical error: Unable to read Excel file: {str(e)}")
+            return
+    
+    # Process each sheet
+    for sheet_name in sheet_names:
+        print(f"\n{'-'*80}")
+        print(f"SHEET: {sheet_name}")
+        print(f"{'-'*80}")
+        
+        try:
+            # Load the first few rows to analyze structure
+            df_sample = pd.read_excel(file_path, sheet_name=sheet_name, nrows=5)
+            
+            # Load entire sheet to get row count and statistics
+            df = pd.read_excel(file_path, sheet_name=sheet_name)
+            
+            # Basic sheet information
+            row_count = len(df)
+            col_count = len(df.columns)
+            print(f"\nRows: {row_count}, Columns: {col_count}")
+            
+            # Column information
+            print("\nCOLUMN STRUCTURE:")
+            print(f"{'Index':<8}{'Column Name':<30}{'Data Type':<20}{'Non-Null Values':<20}{'Sample Values'}")
+            print("-" * 100)
+            
+            for i, col in enumerate(df.columns):
+                # Get data type information
+                dtype = str(df[col].dtype)
+                
+                # Handle different data types for better insight
+                if dtype.startswith('float'):
+                    # For floats, check if they might actually be integers
+                    if df[col].dropna().apply(lambda x: x.is_integer() if isinstance(x, float) else False).all():
+                        dtype = "float (possible int)"
+                elif dtype.startswith('object'):
+                    # For objects, check what they actually contain
+                    value_types = Counter(type(x).__name__ for x in df[col].dropna().head(50))
+                    most_common_type = value_types.most_common(1)
+                    if most_common_type:
+                        dtype = f"object ({most_common_type[0][0]})"
+                
+                # Count non-null values
+                non_null = df[col].count()
+                null_percentage = (1 - non_null/row_count) * 100 if row_count > 0 else 0
+                
+                # Get sample values (first 3)
+                sample_values = str(df[col].head(3).tolist())
+                if len(sample_values) > 40:
+                    sample_values = sample_values[:37] + "..."
+                
+                # Print column info
+                print(f"{i:<8}{str(col)[:29]:<30}{dtype:<20}{f'{non_null}/{row_count} ({100-null_percentage:.1f}%)':<20}{sample_values}")
+            
+            # Print first 5 rows as a sample
+            print("\nSAMPLE DATA (First 5 rows):")
+            pd.set_option('display.max_columns', None)
+            pd.set_option('display.width', 1000)
+            print(df_sample)
+            
+            # Basic statistics for numeric columns
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if numeric_cols:
+                print("\nBASIC STATISTICS FOR NUMERIC COLUMNS:")
+                stats_df = df[numeric_cols].describe().T
+                stats_df = stats_df[['count', 'mean', 'std', 'min', 'max']]
+                print(stats_df)
+            
+            # Detect potential primary keys
+            print("\nPOTENTIAL PRIMARY KEYS:")
+            for col in df.columns:
+                if df[col].count() == row_count:  # No nulls
+                    unique_values = df[col].nunique()
+                    if unique_values == row_count:
+                        print(f"- {col} (unique in all {row_count} rows)")
+            
+            # Check for date columns
+            date_cols = []
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    date_cols.append(col)
+            
+            if date_cols:
+                print("\nDATE COLUMNS:")
+                for col in date_cols:
+                    min_date = df[col].min()
+                    max_date = df[col].max()
+                    print(f"- {col}: Range from {min_date} to {max_date}")
+            
+        except Exception as e:
+            print(f"Error analyzing sheet '{sheet_name}': {str(e)}")
+
+    print(f"\n{'='*80}")
+    print("ANALYSIS COMPLETE")
+    print(f"{'='*80}")
+
+if __name__ == "__main__":
+    # First check if a file path was provided via command line
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+    
+    # Then use the file_path variable (either from the top of the script or command line)
+    if file_path and file_path != "your_excel_file.xlsx":
+        analyze_excel_structure(file_path)
+    else:
+        print("Please specify your Excel file path by editing the 'file_path' variable at the top of the script.")
+```
