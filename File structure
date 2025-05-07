@@ -1,379 +1,287 @@
+```python
 import pandas as pd
 import numpy as np
+from datetime import datetime
 import os
-from openpyxl import load_workbook
-import re
-import json
+import openpyxl
+from openpyxl.utils import get_column_letter
 
-# ======================================================================
-# CONFIGURATION - EDIT THESE SETTINGS
-# ======================================================================
-file_path = "your_excel_file.xlsx"  # <-- EDIT with your file path
-# ======================================================================
-
-def analyze_complex_excel(file_path, output_for_ai=True):
+def extract_call_volumes(file_path):
     """
-    Analyze complex Excel reports with hierarchical structure, parallel columns,
-    and non-standard layouts like the example shown.
+    Extract call volume data from the call volume file.
+    Now specifically targets the three age groups in rows 53, 54, and 55.
+    
+    Args:
+        file_path: Path to the call volume Excel file
+    
+    Returns:
+        Tuple of (call_volumes_18_64, sum_calls_except_18_64)
     """
-    if not os.path.exists(file_path):
-        print(f"Error: File '{file_path}' not found.")
-        return
+    print(f"Reading call volume file: {file_path}")
     
-    print(f"\n{'='*80}")
-    print(f"ANALYZING COMPLEX EXCEL REPORT: {os.path.basename(file_path)}")
-    print(f"{'='*80}")
-    
-    # Load the workbook with openpyxl for detailed cell analysis
     try:
-        wb = load_workbook(filename=file_path, data_only=True)
-        sheet_names = wb.sheetnames
-        print(f"File contains {len(sheet_names)} sheets: {', '.join(sheet_names)}")
-    except Exception as e:
-        print(f"Error opening workbook: {str(e)}")
-        return
-    
-    # Structure to hold all extracted information
-    report_structure = {}
-    
-    # Process each sheet
-    for sheet_name in sheet_names:
-        ws = wb[sheet_name]
-        print(f"\n{'-'*80}")
-        print(f"SHEET: {sheet_name}")
-        print(f"{'-'*80}")
+        # Read the Excel file
+        workbook = openpyxl.load_workbook(file_path, data_only=True)
+        sheet = workbook["Rpt-Vol (daily-quotidien)"]
         
-        # Initialize structure for this sheet
-        sheet_structure = {
-            "dimensions": {"rows": ws.max_row, "columns": ws.max_column},
-            "sections": [],
-            "data_blocks": [],
-            "metrics": [],
-            "parallel_content": {"detected": False, "languages": []},
-            "hierarchical_structure": {"detected": False, "levels": []},
+        # Initialize variables
+        call_volumes_18_64 = 0  
+        sum_calls_except_18_64 = None
+        age_groups_data = []
+        
+        # Define the specific rows containing the 18-64 age groups
+        # Based on the image, these are rows 53, 54, and 55 
+        # The column with values appears to be column AA (or 27 in 0-based index)
+        age_group_rows = [53, 54, 55]
+        value_column = 27  # Column AA (adjust if needed for your file)
+        
+        # Extract values from the specific age group rows
+        for row in age_group_rows:
+            cell_value = sheet.cell(row=row, column=value_column).value
+            label = sheet.cell(row=row, column=3).value  # Column C with description (adjust if needed)
+            
+            if cell_value is not None:
+                # Convert to float if it's a string with commas
+                if isinstance(cell_value, str):
+                    cell_value = float(cell_value.replace(',', ''))
+                
+                if isinstance(cell_value, (int, float)) and cell_value > 0:
+                    call_volumes_18_64 += cell_value
+                    age_groups_data.append((label, cell_value))
+        
+        # Print the found age groups and their values
+        print(f"Found age groups for 18-64:")
+        for label, value in age_groups_data:
+            print(f"  - {label}: {value}")
+        print(f"Total call volumes for 18-64: {call_volumes_18_64}")
+        
+        # Find the sum of calls for all age groups except 18-64
+        # This is typically a pre-calculated value somewhere in the sheet
+        # Common pattern to search for this value
+        sum_found = False
+        for row in range(1, sheet.max_row + 1):
+            row_text = ""
+            for col in range(1, 10):  # Check first 10 columns
+                cell_value = sheet.cell(row=row, column=col).value
+                if cell_value:
+                    row_text += str(cell_value) + " "
+            
+            # Look for a row that mentions sum of calls except 18-64
+            if "sum of calls" in row_text.lower() and "except 18-64" in row_text.lower():
+                for col in range(1, sheet.max_column + 1):
+                    cell_value = sheet.cell(row=row, column=col).value
+                    if isinstance(cell_value, (int, float)) and cell_value > 0:
+                        sum_calls_except_18_64 = cell_value
+                        sum_found = True
+                        print(f"Found sum of calls except 18-64: {sum_calls_except_18_64}")
+                        break
+                if sum_found:
+                    break
+        
+        # If we couldn't find the pre-calculated sum, provide a warning
+        if not sum_found:
+            print("WARNING: Could not find pre-calculated sum of calls except 18-64")
+        
+        return call_volumes_18_64, sum_calls_except_18_64
+        
+    except Exception as e:
+        print(f"Error extracting call volumes: {str(e)}")
+        return None, None
+
+def extract_application_volumes(file_path):
+    """
+    Extract application volume data from the applications volume file.
+    This file already contains only 18-64 data.
+    
+    Args:
+        file_path: Path to the applications volume Excel file
+    
+    Returns:
+        Tuple of (applications_18_64_new, applications_18_64_renewals)
+    """
+    print(f"Reading applications volume file: {file_path}")
+    
+    try:
+        # Read the Excel file
+        df = pd.read_excel(file_path, sheet_name="Sheet1")
+        
+        # Looking at image 4, we need to find the columns for Receive and Type
+        # First, try to find columns by exact name
+        receive_col = None
+        type_col = None
+        
+        for col in df.columns:
+            if isinstance(col, str):
+                if col.lower() == "receive":
+                    receive_col = col
+                elif col.lower() == "type":
+                    type_col = col
+        
+        # If not found by exact name, try more flexible matching
+        if receive_col is None:
+            for col in df.columns:
+                if isinstance(col, str) and "receive" in col.lower():
+                    receive_col = col
+                    break
+            # If still not found, assume it's column B (index 1) based on image 4
+            if receive_col is None and len(df.columns) > 1:
+                receive_col = df.columns[1]
+        
+        if type_col is None:
+            for col in df.columns:
+                if isinstance(col, str) and "type" in col.lower():
+                    type_col = col
+                    break
+            # If still not found, assume it's column E (index 4) based on image 4
+            if type_col is None and len(df.columns) > 4:
+                type_col = df.columns[4]
+        
+        print(f"Using column '{receive_col}' for Receive and column '{type_col}' for Type")
+        
+        # Sum applications for age group 18-64 (New Applications)
+        # This file already only contains 18-64 data, so we just filter by type
+        new_apps_df = df[df[type_col].astype(str).str.contains("New Applications", case=False, na=False)]
+        applications_18_64_new = new_apps_df[receive_col].sum()
+        
+        # Sum applications specifically for renewals
+        renewals_df = df[df[type_col].astype(str).str.contains("Renewals", case=False, na=False)]
+        applications_18_64_renewals = renewals_df[receive_col].sum()
+        
+        print(f"Applications for 18-64 (New Applications): {applications_18_64_new}")
+        print(f"Applications for 18-64 (Renewals): {applications_18_64_renewals}")
+        
+        return applications_18_64_new, applications_18_64_renewals
+        
+    except Exception as e:
+        print(f"Error extracting application volumes: {str(e)}")
+        return None, None
+
+def calculate_calling_rates(call_volumes_18_64, sum_calls_except_18_64, applications_18_64_new, applications_18_64_renewals):
+    """
+    Calculate the calling rates based on the extracted data.
+    
+    Args:
+        call_volumes_18_64: Call volumes for age group 18-64 (summed from three age groups)
+        sum_calls_except_18_64: Sum of calls for all age groups except 18-64
+        applications_18_64_new: Applications for age group 18-64 (New Applications)
+        applications_18_64_renewals: Applications for age group 18-64 (Renewals)
+    
+    Returns:
+        Tuple of (calling_rate_new, calling_rate_renewals)
+    """
+    try:
+        # Calculate calling rate for new applications
+        calling_rate_new = call_volumes_18_64 / applications_18_64_new if applications_18_64_new != 0 else 0
+        
+        # Calculate calling rate for renewals
+        calling_rate_renewals = sum_calls_except_18_64 / applications_18_64_renewals if applications_18_64_renewals != 0 else 0
+        
+        print(f"Calculated calling rates:")
+        print(f"Calling Rate for New Applications (18-64): {calling_rate_new:.4f}")
+        print(f"Calling Rate for Renewals: {calling_rate_renewals:.4f}")
+        
+        return calling_rate_new, calling_rate_renewals
+        
+    except Exception as e:
+        print(f"Error calculating calling rates: {str(e)}")
+        return None, None
+
+def update_output_file(output_path, calling_rate_new, calling_rate_renewals):
+    """
+    Update the output Excel file with the new calling rates.
+    
+    Args:
+        output_path: Path to the output Excel file
+        calling_rate_new: Calling rate for new applications
+        calling_rate_renewals: Calling rate for renewals
+    
+    Returns:
+        Boolean indicating success or failure
+    """
+    try:
+        # Get current date
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # Create data for the new row
+        new_data = {
+            "Date": current_date,
+            "Calling Rate New Applications": calling_rate_new,
+            "Calling Rate Renewals": calling_rate_renewals
         }
         
-        # Scan for section headers (cells with formatting different from data cells)
-        section_headers = []
-        for row in range(1, min(ws.max_row + 1, 50)):  # Check first 50 rows
-            for col in range(1, min(ws.max_column + 1, 20)):  # Check first 20 columns
-                cell = ws.cell(row=row, column=col)
-                # Look for potential headers (non-empty cells with significant text)
-                if cell.value and isinstance(cell.value, str) and len(cell.value) > 3:
-                    # Check if it's a section header (might be bold, have different font, etc.)
-                    is_header = False
-                    if cell.font and (cell.font.bold or cell.font.size and cell.font.size > 11):
-                        is_header = True
-                    elif cell.fill and cell.fill.start_color and cell.fill.start_color.index:
-                        is_header = True
-                    
-                    # If appears to be a header, record it
-                    if is_header:
-                        section_headers.append({
-                            "text": cell.value,
-                            "row": row,
-                            "column": col
-                        })
+        # Check if the file exists
+        if os.path.exists(output_path):
+            print(f"Output file exists, appending new data: {output_path}")
+            
+            # Read the existing file
+            df = pd.read_excel(output_path)
+            
+            # Check if today's date already exists
+            if current_date in df["Date"].astype(str).values:
+                print(f"Data for {current_date} already exists, updating...")
+                df.loc[df["Date"].astype(str) == current_date, "Calling Rate New Applications"] = calling_rate_new
+                df.loc[df["Date"].astype(str) == current_date, "Calling Rate Renewals"] = calling_rate_renewals
+            else:
+                print(f"Adding new row for {current_date}...")
+                df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
+        else:
+            print(f"Output file does not exist, creating new file: {output_path}")
+            df = pd.DataFrame([new_data])
         
-        # Report found headers
-        if section_headers:
-            print("\nDETECTED SECTION HEADERS:")
-            for header in section_headers:
-                print(f"- Row {header['row']}, Col {header['column']}: {header['text']}")
-            
-            sheet_structure["sections"] = section_headers
+        # Save the DataFrame to Excel
+        df.to_excel(output_path, index=False)
         
-        # Check for parallel content (e.g., same structure in different languages)
-        # This often appears as similar content in left/right sides of the sheet
-        left_side_text = []
-        right_side_text = []
-        middle_col = ws.max_column // 2
+        print(f"Output file updated successfully: {output_path}")
+        return True
         
-        for row in range(1, min(ws.max_row + 1, 30)):
-            # Get text from left side
-            left_text = ""
-            for col in range(1, middle_col):
-                cell_value = ws.cell(row=row, column=col).value
-                if cell_value and isinstance(cell_value, str):
-                    left_text += str(cell_value) + " "
-            
-            # Get text from right side
-            right_text = ""
-            for col in range(middle_col + 1, ws.max_column + 1):
-                cell_value = ws.cell(row=row, column=col).value
-                if cell_value and isinstance(cell_value, str):
-                    right_text += str(cell_value) + " "
-            
-            if left_text.strip():
-                left_side_text.append(left_text.strip())
-            if right_text.strip():
-                right_side_text.append(right_text.strip())
-        
-        # Simple heuristic for bilingual content: check if there's substantial text on both sides
-        # and they have similar structure but different words
-        if len(left_side_text) > 5 and len(right_side_text) > 5:
-            left_chars = sum(len(t) for t in left_side_text)
-            right_chars = sum(len(t) for t in right_side_text)
-            
-            # If both sides have text and are within 40% of each other in length
-            if left_chars > 100 and right_chars > 100 and 0.6 <= left_chars / right_chars <= 1.4:
-                print("\nPARALLEL CONTENT DETECTED (possibly bilingual):")
-                print(f"- Left side: ~{left_chars} characters")
-                print(f"- Right side: ~{right_chars} characters")
-                
-                # Try to detect languages
-                left_lang = detect_language(left_side_text[:10])
-                right_lang = detect_language(right_side_text[:10])
-                
-                print(f"- Probable languages: {left_lang} (left) and {right_lang} (right)")
-                
-                sheet_structure["parallel_content"] = {
-                    "detected": True,
-                    "languages": [left_lang, right_lang],
-                    "left_sample": left_side_text[:3],
-                    "right_sample": right_side_text[:3]
-                }
-        
-        # Identify data blocks (areas with concentrated numeric values)
-        data_blocks = []
-        current_block = None
-        
-        for row in range(1, ws.max_row + 1):
-            numeric_count = 0
-            numeric_cols = []
-            
-            for col in range(1, ws.max_column + 1):
-                cell_value = ws.cell(row=row, column=col).value
-                if isinstance(cell_value, (int, float)) and not isinstance(cell_value, bool):
-                    numeric_count += 1
-                    numeric_cols.append(col)
-            
-            # If this row has several numeric values, it might be part of a data block
-            if numeric_count >= 3:
-                if current_block is None:
-                    current_block = {
-                        "start_row": row,
-                        "end_row": row,
-                        "columns": numeric_cols,
-                        "numeric_density": numeric_count / ws.max_column
-                    }
-                else:
-                    current_block["end_row"] = row
-                    current_block["columns"] = list(set(current_block["columns"] + numeric_cols))
-            elif current_block is not None:
-                # If we were tracking a block but this row doesn't have enough numeric values
-                if row - current_block["end_row"] > 2:  # Allow a 2-row gap
-                    data_blocks.append(current_block)
-                    current_block = None
-        
-        # Add any remaining block
-        if current_block is not None:
-            data_blocks.append(current_block)
-        
-        # Report data blocks
-        if data_blocks:
-            print("\nDETECTED DATA BLOCKS:")
-            for i, block in enumerate(data_blocks):
-                print(f"- Block {i+1}: Rows {block['start_row']}-{block['end_row']}, " +
-                     f"{len(block['columns'])} columns with numeric data")
-                
-                # Sample some data from this block
-                print("  Sample values:")
-                sample_row = min(block['start_row'] + 1, block['end_row'])
-                sample_data = []
-                
-                # Try to find label column (usually to the left of numeric data)
-                label_col = min(block['columns']) - 1 if min(block['columns']) > 1 else min(block['columns'])
-                label = ws.cell(row=sample_row, column=label_col).value
-                
-                # Get sample numeric values
-                for col in block['columns'][:3]:  # Sample first 3 numeric columns
-                    value = ws.cell(row=sample_row, column=col).value
-                    if value is not None:
-                        sample_data.append(str(value))
-                
-                print(f"    Row {sample_row}: Label='{label}', Values={', '.join(sample_data)}")
-            
-            sheet_structure["data_blocks"] = data_blocks
-        
-        # Look for hierarchical structure (indentation patterns or numbering)
-        hierarchy_detected = False
-        hierarchy_patterns = []
-        
-        # Check first 30 rows for patterns
-        for row in range(1, min(ws.max_row + 1, 30)):
-            for col in range(1, min(ws.max_column + 1, 5)):  # Check first few columns
-                cell_value = ws.cell(row=row, column=col).value
-                if isinstance(cell_value, str):
-                    # Check for numbering patterns like "1.", "1.1", "I.", "A.", etc.
-                    numbering_match = re.match(r'^(\d+\.|\d+\.\d+|\w+\.|[IVX]+\.).*', cell_value.strip())
-                    
-                    # Check for indentation (harder to detect without visual info)
-                    indentation = cell_value.startswith('  ') or cell_value.startswith('\t')
-                    
-                    if numbering_match or indentation:
-                        hierarchy_detected = True
-                        hierarchy_patterns.append({
-                            "row": row,
-                            "column": col,
-                            "text": cell_value,
-                            "type": "numbering" if numbering_match else "indentation"
-                        })
-        
-        if hierarchy_detected:
-            print("\nHIERARCHICAL STRUCTURE DETECTED:")
-            for pattern in hierarchy_patterns[:5]:  # Show first 5 examples
-                print(f"- Row {pattern['row']}, Col {pattern['column']}: " +
-                     f"{pattern['text']} (detected by {pattern['type']})")
-            
-            if len(hierarchy_patterns) > 5:
-                print(f"  ... and {len(hierarchy_patterns) - 5} more instances")
-            
-            sheet_structure["hierarchical_structure"] = {
-                "detected": True,
-                "patterns": hierarchy_patterns[:10]  # Store first 10 patterns
-            }
-        
-        # Extract key metrics (cells with both labels and numeric values)
-        metrics = []
-        
-        # First pass: identify potential metric rows
-        for row in range(1, ws.max_row + 1):
-            has_label = False
-            has_number = False
-            label_text = ""
-            number_value = None
-            number_col = None
-            
-            for col in range(1, ws.max_column + 1):
-                cell_value = ws.cell(row=row, column=col).value
-                
-                # Look for text labels
-                if isinstance(cell_value, str) and len(cell_value.strip()) > 2:
-                    has_label = True
-                    if not label_text:  # Take the first substantial text as label
-                        label_text = cell_value
-                
-                # Look for numeric values
-                if isinstance(cell_value, (int, float)) and not isinstance(cell_value, bool):
-                    has_number = True
-                    if number_value is None:  # Take the first number
-                        number_value = cell_value
-                        number_col = col
-            
-            # If the row has both a label and a number, it might be a metric
-            if has_label and has_number and label_text and number_value is not None:
-                metrics.append({
-                    "row": row,
-                    "label": label_text,
-                    "value": number_value,
-                    "value_column": number_col
-                })
-        
-        # Report key metrics
-        if metrics:
-            print("\nKEY METRICS DETECTED:")
-            for metric in metrics[:10]:  # Show first 10 metrics
-                print(f"- {metric['label']}: {metric['value']}")
-            
-            if len(metrics) > 10:
-                print(f"  ... and {len(metrics) - 10} more metrics")
-            
-            sheet_structure["metrics"] = metrics[:20]  # Store first 20 metrics
-            
-        # Generate AI-friendly summary for this sheet
-        if output_for_ai:
-            print(f"\n{'-'*40}")
-            print(f"AI-FRIENDLY SUMMARY FOR SHEET: {sheet_name}")
-            print(f"{'-'*40}")
-            
-            print("\nSHEET STRUCTURE OVERVIEW:")
-            print(f"1. This sheet contains {ws.max_row} rows and {ws.max_column} columns")
-            
-            if sheet_structure["parallel_content"]["detected"]:
-                langs = sheet_structure["parallel_content"]["languages"]
-                print(f"2. BILINGUAL CONTENT detected in {langs[0]} and {langs[1]}")
-                print("   The sheet appears to have parallel content in two languages")
-            
-            if section_headers:
-                print(f"3. SECTION HEADERS: {len(section_headers)} distinct sections identified")
-                print("   Major sections include:")
-                for header in section_headers[:5]:
-                    print(f"   - {header['text']}")
-            
-            if data_blocks:
-                print(f"4. DATA BLOCKS: {len(data_blocks)} areas with concentrated numeric data")
-                print("   These represent tables or data regions within the report")
-            
-            if sheet_structure["hierarchical_structure"]["detected"]:
-                print("5. HIERARCHICAL STRUCTURE: The data appears to be organized in a hierarchy")
-                print("   Items are organized with numbering or indentation patterns")
-            
-            if metrics:
-                print(f"6. KEY METRICS: {len(metrics)} metrics identified")
-                print("   Important values include:")
-                for metric in metrics[:5]:
-                    print(f"   - {metric['label']}: {metric['value']}")
-            
-            print("\nRECOMMENDED APPROACH FOR AI ANALYSIS:")
-            print("1. This is a complex report-style sheet, not a standard data table")
-            print("2. Consider extracting specific sections rather than treating as tabular data")
-            print("3. Focus on the key metrics and section headers for contextual understanding")
-            if sheet_structure["parallel_content"]["detected"]:
-                print("4. Be aware of the bilingual nature - analyze both language sections")
-            print("5. The hierarchical organization suggests relationships between data elements")
-        
-        # Store the structure for this sheet
-        report_structure[sheet_name] = sheet_structure
-    
-    print(f"\n{'='*80}")
-    print("COMPLEX EXCEL REPORT ANALYSIS COMPLETE")
-    print(f"{'='*80}")
-    
-    # Option to save structure to JSON for further processing
-    should_save = input("\nWould you like to save the structure analysis to JSON? (y/n): ")
-    if should_save.lower() == 'y':
-        output_path = os.path.splitext(file_path)[0] + "_structure.json"
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(report_structure, f, ensure_ascii=False, indent=2)
-        print(f"Structure saved to: {output_path}")
-    
-    return report_structure
+    except Exception as e:
+        print(f"Error updating output file: {str(e)}")
+        return False
 
-def detect_language(text_samples):
-    """
-    Simple heuristic language detection for English, French and a few other languages.
-    For demonstration - a real implementation would use a language detection library.
-    """
-    # Combine all text samples
-    text = " ".join(text_samples).lower()
+def main():
+    """Main function to run the daily calling rate calculation."""
+    # File paths - UPDATE THESE WITH YOUR ACTUAL PATHS
+    call_volume_path = "path/to/call_volume_file.xlsx"
+    applications_volume_path = "path/to/applications_volume_file.xlsx"
+    output_path = "path/to/output_file.xlsx"
     
-    # Define language fingerprints (common words/patterns)
-    lang_patterns = {
-        "English": ["the", "and", "of", "to", "a", "in", "for", "is", "on", "that"],
-        "French": ["le", "la", "les", "des", "un", "une", "et", "ou", "pour", "dans", "est"],
-        "Spanish": ["el", "la", "los", "las", "y", "en", "de", "que", "por", "con"],
-        "German": ["der", "die", "das", "und", "in", "zu", "den", "für", "ist", "auf"]
-    }
+    print(f"Starting daily calling rate calculation...")
     
-    # Count matches for each language
-    scores = {}
-    for lang, patterns in lang_patterns.items():
-        score = 0
-        for pattern in patterns:
-            if f" {pattern} " in f" {text} " or text.startswith(pattern + " "):
-                score += 1
-        scores[lang] = score
+    # Extract data from input files
+    call_volumes_18_64, sum_calls_except_18_64 = extract_call_volumes(call_volume_path)
     
-    # Return language with highest score
-    best_lang = max(scores, key=scores.get)
-    return best_lang if scores[best_lang] > 2 else "Unknown"
+    if call_volumes_18_64 is None or sum_calls_except_18_64 is None:
+        print("ERROR: Failed to extract call volume data. Please check the file structure.")
+        return
+    
+    # Extract application volumes - this file already only contains 18-64 data
+    applications_18_64_new, applications_18_64_renewals = extract_application_volumes(applications_volume_path)
+    
+    if applications_18_64_new is None or applications_18_64_renewals is None:
+        print("ERROR: Failed to extract application volume data. Please check the file structure.")
+        return
+    
+    # Calculate calling rates
+    calling_rate_new, calling_rate_renewals = calculate_calling_rates(
+        call_volumes_18_64, sum_calls_except_18_64, applications_18_64_new, applications_18_64_renewals
+    )
+    
+    if calling_rate_new is None or calling_rate_renewals is None:
+        print("ERROR: Failed to calculate calling rates.")
+        return
+    
+    # Update the output file
+    success = update_output_file(output_path, calling_rate_new, calling_rate_renewals)
+    
+    if success:
+        print("\n✅ SUCCESS: Daily calling rates have been calculated and saved.")
+        print("    - New Applications Rate: Call Volumes for 18-64 age groups (sum of rows 53, 54, 55)")
+        print("                            divided by Applications for 18-64 (New Applications)")
+        print("    - Renewals Rate: Sum of calls except 18-64")
+        print("                    divided by Applications for 18-64 (Renewals)")
+    else:
+        print("\n❌ ERROR: Failed to update the output file.")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        file_path = sys.argv[1]
-    
-    if file_path and file_path != "your_excel_file.xlsx":
-        analyze_complex_excel(file_path)
-    else:
-        print("Please specify your Excel file path by editing the 'file_path' variable at the top of the script.")
+    main()
+```
