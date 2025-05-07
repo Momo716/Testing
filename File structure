@@ -1,19 +1,22 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import openpyxl
 from openpyxl.utils import get_column_letter
+import re
+import glob
 
-def extract_call_volumes(file_path):
+def extract_call_volumes(file_path, target_date=None):
     """
     Extract call volume data from the call volume file.
     
     Args:
         file_path: Path to the call volume Excel file
+        target_date: Optional specific date to extract data for (format: 'YYYY-MM-DD')
     
     Returns:
-        Tuple of (call_volumes_18_64, sum_calls_except_18_64)
+        Dictionary with dates as keys and tuples of (call_volumes_18_64, sum_calls_except_18_64) as values
     """
     print(f"Reading call volume file: {file_path}")
     
@@ -22,103 +25,151 @@ def extract_call_volumes(file_path):
         workbook = openpyxl.load_workbook(file_path, data_only=True)
         sheet = workbook["Rpt-Vol (daily-quotidien)"]
         
-        # Initialize variables
-        call_volumes_18_64 = 0  
-        sum_calls_except_18_64 = 0  # Initialize to 0 since we'll calculate this
-        age_groups_18_64 = []
-        other_age_groups = []
-        
-        # Based on the screenshot, we need to find the "YTD/AAJ" column
+        # Find the YTD/AAJ column and available date columns
         ytd_column = None
-        for col in range(1, sheet.max_column + 1):
-            if str(sheet.cell(row=1, column=col).value).upper() == "YTD/AAJ":
-                ytd_column = col
-                break
+        date_columns = {}  # Dictionary to store {column_index: date_string}
         
-        # If not found, check row 4 which also appears to have headers
+        # Search for column headers in the first 10 rows
+        for row in range(1, 10):
+            for col in range(1, sheet.max_column + 1):
+                cell_value = sheet.cell(row=row, column=col).value
+                if cell_value:
+                    # Check for YTD column
+                    if str(cell_value).upper() == "YTD/AAJ":
+                        ytd_column = col
+                        print(f"Found YTD/AAJ column at position {col}")
+                    
+                    # Check for date columns (format: YYYY-MM-DD or similar)
+                    if isinstance(cell_value, datetime):
+                        date_str = cell_value.strftime('%Y-%m-%d')
+                        date_columns[col] = date_str
+                        print(f"Found date column at position {col}: {date_str}")
+                    elif isinstance(cell_value, str):
+                        # Look for date patterns in strings (e.g., "2025-04-01")
+                        date_pattern = re.search(r'(20\d\d[-/]\d\d[-/]\d\d)', cell_value)
+                        if date_pattern:
+                            date_str = date_pattern.group(1).replace('/', '-')
+                            date_columns[col] = date_str
+                            print(f"Found date column at position {col}: {date_str}")
+        
+        # If no date columns found, check if the file has a date in its name
+        if not date_columns and ytd_column:
+            # If only YTD column found, assume it's for yesterday
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            date_columns[ytd_column] = yesterday
+            print(f"No date columns found, assuming YTD is for {yesterday}")
+        
+        # If still no YTD column, use a fallback
         if ytd_column is None:
             for col in range(1, sheet.max_column + 1):
-                if str(sheet.cell(row=4, column=col).value).upper() == "YTD/AAJ":
-                    ytd_column = col
-                    break
-                elif str(sheet.cell(row=4, column=col).value).upper() == "TRACKED / SUIVIS %":
-                    # The YTD/AAJ is usually before the percentage column
-                    ytd_column = col - 1
+                header_val = sheet.cell(row=4, column=col).value
+                if header_val and "TRACKED / SUIVIS %" in str(header_val).upper():
+                    ytd_column = col - 1  # YTD is usually before percentage
+                    print(f"Using fallback: YTD/AAJ column at position {ytd_column}")
                     break
         
-        # If still not found, use a fixed column (from screenshot it appears to be column D or E)
         if ytd_column is None:
-            ytd_column = 5  # Try column E as a fallback
-            print("WARNING: Could not find YTD/AAJ column, using column E as fallback")
-        else:
-            print(f"Found YTD/AAJ column at position {ytd_column}")
+            print("WARNING: Could not find YTD/AAJ column")
+            return None
         
-        # Define the specific rows containing the 18-64 age groups
-        # From screenshot: rows 53, 54, and 55
-        age_group_18_64_rows = [53, 54, 55]
+        # Filter date columns if a target date is specified
+        if target_date:
+            filtered_date_columns = {k: v for k, v in date_columns.items() if v == target_date}
+            if not filtered_date_columns and ytd_column:
+                # If no matching date but we have YTD, use that for the target date
+                filtered_date_columns[ytd_column] = target_date
+            date_columns = filtered_date_columns
         
-        # Define rows to exclude (crossed out rows)
-        excluded_rows = [49, 50, 51, 52]
+        # If no date columns found or filtered, include YTD column with yesterday's date
+        if not date_columns and ytd_column:
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            date_columns[ytd_column] = yesterday
         
-        # Define the other age groups (all relevant rows except 18-64 and crossed out)
-        # Based on the screenshot, these include rows 42-48 plus row 56
-        other_age_group_rows = list(range(42, 49)) + [56]
+        # Check if we have Jan 2025 onwards in our date_columns
+        jan_2025 = datetime(2025, 1, 1)
+        has_historical = any(datetime.strptime(date, '%Y-%m-%d') >= jan_2025 for date in date_columns.values())
         
-        # Extract values from the 18-64 age group rows
-        for row in age_group_18_64_rows:
-            cell_value = sheet.cell(row=row, column=ytd_column).value
-            label = sheet.cell(row=row, column=3).value  # Column C with description
+        if not has_historical:
+            print("WARNING: No data found from January 2025 onwards. Will only process current data.")
+        
+        # Process each date column
+        results = {}
+        for col, date_str in date_columns.items():
+            print(f"\nProcessing data for date: {date_str}")
             
-            if cell_value is not None:
-                # Convert to float if it's a string with commas
-                if isinstance(cell_value, str):
-                    cell_value = float(cell_value.replace(',', ''))
-                
-                if isinstance(cell_value, (int, float)) and cell_value > 0:
-                    call_volumes_18_64 += cell_value
-                    age_groups_18_64.append((label, cell_value))
-        
-        # Extract values from the other age group rows to calculate sum_calls_except_18_64
-        for row in other_age_group_rows:
-            cell_value = sheet.cell(row=row, column=ytd_column).value
-            label = sheet.cell(row=row, column=3).value  # Column C with description
+            # Define the specific rows containing the 18-64 age groups
+            age_group_18_64_rows = [53, 54, 55]
             
-            if cell_value is not None:
-                # Convert to float if it's a string with commas
-                if isinstance(cell_value, str):
-                    cell_value = float(cell_value.replace(',', ''))
+            # Define rows to exclude (crossed out rows)
+            excluded_rows = [49, 50, 51, 52]
+            
+            # Define the other age groups (all relevant rows except 18-64 and crossed out)
+            other_age_group_rows = list(range(42, 49)) + [56]
+            
+            # Initialize counters for this date
+            call_volumes_18_64 = 0
+            sum_calls_except_18_64 = 0
+            age_groups_18_64 = []
+            other_age_groups = []
+            
+            # Extract values from the 18-64 age group rows
+            for row in age_group_18_64_rows:
+                cell_value = sheet.cell(row=row, column=col).value
+                label = sheet.cell(row=row, column=3).value  # Column C with description
                 
-                if isinstance(cell_value, (int, float)) and cell_value > 0:
-                    sum_calls_except_18_64 += cell_value
-                    other_age_groups.append((label, cell_value))
+                if cell_value is not None:
+                    # Convert to float if it's a string with commas
+                    if isinstance(cell_value, str):
+                        cell_value = float(cell_value.replace(',', ''))
+                    
+                    if isinstance(cell_value, (int, float)) and cell_value > 0:
+                        call_volumes_18_64 += cell_value
+                        age_groups_18_64.append((label, cell_value))
+            
+            # Extract values from the other age group rows
+            for row in other_age_group_rows:
+                cell_value = sheet.cell(row=row, column=col).value
+                label = sheet.cell(row=row, column=3).value  # Column C with description
+                
+                if cell_value is not None:
+                    # Convert to float if it's a string with commas
+                    if isinstance(cell_value, str):
+                        cell_value = float(cell_value.replace(',', ''))
+                    
+                    if isinstance(cell_value, (int, float)) and cell_value > 0:
+                        sum_calls_except_18_64 += cell_value
+                        other_age_groups.append((label, cell_value))
+            
+            # Print the found age groups and their values for this date
+            print(f"  Found age groups for 18-64 on {date_str}:")
+            for label, value in age_groups_18_64:
+                print(f"    - {label}: {value}")
+            print(f"  Total call volumes for 18-64: {call_volumes_18_64}")
+            
+            print(f"\n  Calculated sum of calls except 18-64 on {date_str}:")
+            for label, value in other_age_groups:
+                print(f"    - {label}: {value}")
+            print(f"  Total call volumes except 18-64: {sum_calls_except_18_64}")
+            
+            # Store results for this date
+            results[date_str] = (call_volumes_18_64, sum_calls_except_18_64)
         
-        # Print the found age groups and their values
-        print(f"Found age groups for 18-64:")
-        for label, value in age_groups_18_64:
-            print(f"  - {label}: {value}")
-        print(f"Total call volumes for 18-64: {call_volumes_18_64}")
-        
-        print(f"\nCalculated sum of calls except 18-64:")
-        for label, value in other_age_groups:
-            print(f"  - {label}: {value}")
-        print(f"Total call volumes except 18-64: {sum_calls_except_18_64}")
-        
-        return call_volumes_18_64, sum_calls_except_18_64
+        return results
         
     except Exception as e:
         print(f"Error extracting call volumes: {str(e)}")
-        return None, None
+        return None
 
-def extract_application_volumes(file_path):
+def extract_application_volumes(file_path, target_date=None):
     """
     Extract application volume data from the applications volume file.
-    This file already contains only 18-64 data.
     
     Args:
         file_path: Path to the applications volume Excel file
+        target_date: Optional specific date to extract data for (format: 'YYYY-MM-DD')
     
     Returns:
-        Tuple of (applications_18_64_new, applications_18_64_renewals)
+        Dictionary with dates as keys and tuples of (applications_18_64_new, applications_18_64_renewals) as values
     """
     print(f"Reading applications volume file: {file_path}")
     
@@ -126,8 +177,22 @@ def extract_application_volumes(file_path):
         # Read the Excel file
         df = pd.read_excel(file_path, sheet_name="Sheet1")
         
-        # Looking at image 4, we need to find the columns for Receive and Type
-        # First, try to find columns by exact name
+        # Check if there's a date column in the file
+        date_column = None
+        for col in df.columns:
+            if col.lower() in ['date', 'dates', 'day', 'days']:
+                date_column = col
+                break
+        
+        # If no date column, check for columns that might contain dates
+        if date_column is None:
+            for col in df.columns:
+                if df[col].dtype == 'datetime64[ns]' or (df[col].dtype == 'object' and 
+                   df[col].astype(str).str.match(r'^\d{4}-\d{2}-\d{2}$').any()):
+                    date_column = col
+                    break
+        
+        # Find receive and type columns
         receive_col = None
         type_col = None
         
@@ -159,104 +224,251 @@ def extract_application_volumes(file_path):
         
         print(f"Using column '{receive_col}' for Receive and column '{type_col}' for Type")
         
-        # Sum applications for age group 18-64 (New Applications)
-        # This file already only contains 18-64 data, so we just filter by type
-        new_apps_df = df[df[type_col].astype(str).str.contains("New Applications", case=False, na=False)]
-        applications_18_64_new = new_apps_df[receive_col].sum()
-        
-        # Sum applications specifically for renewals
-        renewals_df = df[df[type_col].astype(str).str.contains("Renewals", case=False, na=False)]
-        applications_18_64_renewals = renewals_df[receive_col].sum()
-        
-        print(f"Applications for 18-64 (New Applications): {applications_18_64_new}")
-        print(f"Applications for 18-64 (Renewals): {applications_18_64_renewals}")
-        
-        return applications_18_64_new, applications_18_64_renewals
+        # Process data by date if a date column exists
+        if date_column:
+            print(f"Found date column: {date_column}")
+            
+            # Filter to dates from Jan 2025 onwards
+            df['date'] = pd.to_datetime(df[date_column], errors='coerce')
+            df = df[df['date'] >= '2025-01-01']
+            
+            # Filter to specific date if provided
+            if target_date:
+                df = df[df['date'] == target_date]
+            
+            if df.empty:
+                print("WARNING: No data found for the specified date range")
+                return None
+            
+            # Group by date and calculate values
+            results = {}
+            for date, group in df.groupby('date'):
+                date_str = date.strftime('%Y-%m-%d')
+                
+                # Sum applications for New Applications
+                new_apps_df = group[group[type_col].astype(str).str.contains("New Applications", case=False, na=False)]
+                applications_18_64_new = new_apps_df[receive_col].sum()
+                
+                # Sum applications for Renewals
+                renewals_df = group[group[type_col].astype(str).str.contains("Renewals", case=False, na=False)]
+                applications_18_64_renewals = renewals_df[receive_col].sum()
+                
+                print(f"Applications for {date_str}:")
+                print(f"  - New Applications: {applications_18_64_new}")
+                print(f"  - Renewals: {applications_18_64_renewals}")
+                
+                results[date_str] = (applications_18_64_new, applications_18_64_renewals)
+            
+            return results
+        else:
+            # If no date column, just process the whole file as one date (default to yesterday)
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            
+            # Sum applications for age group 18-64 (New Applications)
+            new_apps_df = df[df[type_col].astype(str).str.contains("New Applications", case=False, na=False)]
+            applications_18_64_new = new_apps_df[receive_col].sum()
+            
+            # Sum applications specifically for renewals
+            renewals_df = df[df[type_col].astype(str).str.contains("Renewals", case=False, na=False)]
+            applications_18_64_renewals = renewals_df[receive_col].sum()
+            
+            print(f"Applications for {yesterday}:")
+            print(f"  - New Applications: {applications_18_64_new}")
+            print(f"  - Renewals: {applications_18_64_renewals}")
+            
+            return {yesterday: (applications_18_64_new, applications_18_64_renewals)}
         
     except Exception as e:
         print(f"Error extracting application volumes: {str(e)}")
-        return None, None
+        return None
 
-def calculate_calling_rates(call_volumes_18_64, sum_calls_except_18_64, applications_18_64_new, applications_18_64_renewals):
+def calculate_calling_rates(call_data, app_data):
     """
     Calculate the calling rates based on the extracted data.
     
     Args:
-        call_volumes_18_64: Call volumes for age group 18-64 (summed from three age groups)
-        sum_calls_except_18_64: Sum of calls for all age groups except 18-64
-        applications_18_64_new: Applications for age group 18-64 (New Applications)
-        applications_18_64_renewals: Applications for age group 18-64 (Renewals)
+        call_data: Dictionary with dates as keys and (call_volumes_18_64, sum_calls_except_18_64) as values
+        app_data: Dictionary with dates as keys and (applications_18_64_new, applications_18_64_renewals) as values
     
     Returns:
-        Tuple of (calling_rate_new, calling_rate_renewals)
+        Dictionary with dates as keys and (calling_rate_new, calling_rate_renewals) as values
     """
     try:
-        # Calculate calling rate for new applications
-        calling_rate_new = call_volumes_18_64 / applications_18_64_new if applications_18_64_new != 0 else 0
+        results = {}
         
-        # Calculate calling rate for renewals
-        calling_rate_renewals = sum_calls_except_18_64 / applications_18_64_renewals if applications_18_64_renewals != 0 else 0
+        # Find common dates in both datasets
+        common_dates = set(call_data.keys()).intersection(set(app_data.keys()))
         
-        print(f"Calculated calling rates:")
-        print(f"Calling Rate for New Applications (18-64): {calling_rate_new:.4f}")
-        print(f"Calling Rate for Renewals: {calling_rate_renewals:.4f}")
+        if not common_dates:
+            print("WARNING: No common dates found between call data and application data")
+            return None
         
-        return calling_rate_new, calling_rate_renewals
+        for date in common_dates:
+            call_volumes_18_64, sum_calls_except_18_64 = call_data[date]
+            applications_18_64_new, applications_18_64_renewals = app_data[date]
+            
+            # Calculate calling rate for new applications
+            calling_rate_new = call_volumes_18_64 / applications_18_64_new if applications_18_64_new != 0 else 0
+            
+            # Calculate calling rate for renewals
+            calling_rate_renewals = sum_calls_except_18_64 / applications_18_64_renewals if applications_18_64_renewals != 0 else 0
+            
+            print(f"Calculated calling rates for {date}:")
+            print(f"  - New Applications: {calling_rate_new:.4f}")
+            print(f"  - Renewals: {calling_rate_renewals:.4f}")
+            
+            results[date] = (calling_rate_new, calling_rate_renewals)
+        
+        return results
         
     except Exception as e:
         print(f"Error calculating calling rates: {str(e)}")
-        return None, None
+        return None
 
-def update_output_file(output_path, calling_rate_new, calling_rate_renewals):
+def update_output_file(output_path, rate_data):
     """
     Update the output Excel file with the new calling rates.
     
     Args:
         output_path: Path to the output Excel file
-        calling_rate_new: Calling rate for new applications
-        calling_rate_renewals: Calling rate for renewals
+        rate_data: Dictionary with dates as keys and (calling_rate_new, calling_rate_renewals) as values
     
     Returns:
         Boolean indicating success or failure
     """
     try:
-        # Get current date
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        
-        # Create data for the new row
-        new_data = {
-            "Date": current_date,
-            "Calling Rate New Applications": calling_rate_new,
-            "Calling Rate Renewals": calling_rate_renewals
-        }
-        
-        # Check if the file exists
+        # Initialize DataFrame with existing data or create new one
         if os.path.exists(output_path):
             print(f"Output file exists, appending new data: {output_path}")
-            
-            # Read the existing file
             df = pd.read_excel(output_path)
-            
-            # Check if today's date already exists
-            if current_date in df["Date"].astype(str).values:
-                print(f"Data for {current_date} already exists, updating...")
-                df.loc[df["Date"].astype(str) == current_date, "Calling Rate New Applications"] = calling_rate_new
-                df.loc[df["Date"].astype(str) == current_date, "Calling Rate Renewals"] = calling_rate_renewals
-            else:
-                print(f"Adding new row for {current_date}...")
-                df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
+            # Ensure Date column is in datetime format
+            df['Date'] = pd.to_datetime(df['Date'])
         else:
             print(f"Output file does not exist, creating new file: {output_path}")
-            df = pd.DataFrame([new_data])
+            df = pd.DataFrame(columns=["Date", "Calling Rate New Applications", "Calling Rate Renewals"])
+        
+        # Initialize data rows to add
+        new_rows = []
+        updated_count = 0
+        
+        # Process each date's data
+        for date_str, (calling_rate_new, calling_rate_renewals) in rate_data.items():
+            date = datetime.strptime(date_str, '%Y-%m-%d')
+            
+            # Check if this date already exists in the DataFrame
+            if date in df['Date'].values:
+                df.loc[df['Date'] == date, 'Calling Rate New Applications'] = calling_rate_new
+                df.loc[df['Date'] == date, 'Calling Rate Renewals'] = calling_rate_renewals
+                updated_count += 1
+            else:
+                new_rows.append({
+                    "Date": date,
+                    "Calling Rate New Applications": calling_rate_new,
+                    "Calling Rate Renewals": calling_rate_renewals
+                })
+        
+        # Add any new rows
+        if new_rows:
+            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+        
+        # Sort by date
+        df = df.sort_values('Date')
         
         # Save the DataFrame to Excel
         df.to_excel(output_path, index=False)
         
         print(f"Output file updated successfully: {output_path}")
+        print(f"  - Updated {updated_count} existing entries")
+        print(f"  - Added {len(new_rows)} new entries")
+        
         return True
         
     except Exception as e:
         print(f"Error updating output file: {str(e)}")
+        return False
+
+def process_historical_data(call_volume_path, applications_volume_path, output_path):
+    """
+    Process all historical data from January 2025 onwards.
+    
+    Args:
+        call_volume_path: Path to the call volume file
+        applications_volume_path: Path to the applications volume file
+        output_path: Path to the output Excel file
+    
+    Returns:
+        Boolean indicating success or failure
+    """
+    try:
+        print("Processing historical data from January 2025 onwards...")
+        
+        # Extract all available dates of data
+        call_data = extract_call_volumes(call_volume_path)
+        if not call_data:
+            print("ERROR: Failed to extract call volume data.")
+            return False
+        
+        app_data = extract_application_volumes(applications_volume_path)
+        if not app_data:
+            print("ERROR: Failed to extract application volume data.")
+            return False
+        
+        # Calculate rates for all dates
+        rate_data = calculate_calling_rates(call_data, app_data)
+        if not rate_data:
+            print("ERROR: Failed to calculate calling rates.")
+            return False
+        
+        # Update output file with all dates
+        success = update_output_file(output_path, rate_data)
+        
+        return success
+        
+    except Exception as e:
+        print(f"Error processing historical data: {str(e)}")
+        return False
+
+def process_daily_data(call_volume_path, applications_volume_path, output_path):
+    """
+    Process a single day's data (yesterday by default).
+    
+    Args:
+        call_volume_path: Path to the call volume file
+        applications_volume_path: Path to the applications volume file
+        output_path: Path to the output Excel file
+    
+    Returns:
+        Boolean indicating success or failure
+    """
+    try:
+        # Use yesterday's date since data is updated one day later
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        print(f"Processing data for {yesterday}...")
+        
+        # Extract yesterday's data
+        call_data = extract_call_volumes(call_volume_path, yesterday)
+        if not call_data:
+            print("ERROR: Failed to extract call volume data for yesterday.")
+            return False
+        
+        app_data = extract_application_volumes(applications_volume_path, yesterday)
+        if not app_data:
+            print("ERROR: Failed to extract application volume data for yesterday.")
+            return False
+        
+        # Calculate rates for yesterday
+        rate_data = calculate_calling_rates(call_data, app_data)
+        if not rate_data:
+            print("ERROR: Failed to calculate calling rates for yesterday.")
+            return False
+        
+        # Update output file with yesterday's data
+        success = update_output_file(output_path, rate_data)
+        
+        return success
+        
+    except Exception as e:
+        print(f"Error processing daily data: {str(e)}")
         return False
 
 def main():
@@ -266,43 +478,24 @@ def main():
     applications_volume_path = "path/to/applications_volume_file.xlsx"
     output_path = "path/to/output_file.xlsx"
     
-    print(f"Starting daily calling rate calculation...")
+    print(f"Starting calling rate calculation...")
     
-    # Extract data from input files
-    call_volumes_18_64, sum_calls_except_18_64 = extract_call_volumes(call_volume_path)
+    # Ask user whether to process historical data or just yesterday's data
+    process_type = input("Do you want to process (1) historical data from Jan 2025 onwards or (2) just yesterday's data? Enter 1 or 2: ")
     
-    if call_volumes_18_64 is None or sum_calls_except_18_64 is None:
-        print("ERROR: Failed to extract call volume data. Please check the file structure.")
-        return
-    
-    # Extract application volumes - this file already only contains 18-64 data
-    applications_18_64_new, applications_18_64_renewals = extract_application_volumes(applications_volume_path)
-    
-    if applications_18_64_new is None or applications_18_64_renewals is None:
-        print("ERROR: Failed to extract application volume data. Please check the file structure.")
-        return
-    
-    # Calculate calling rates
-    calling_rate_new, calling_rate_renewals = calculate_calling_rates(
-        call_volumes_18_64, sum_calls_except_18_64, applications_18_64_new, applications_18_64_renewals
-    )
-    
-    if calling_rate_new is None or calling_rate_renewals is None:
-        print("ERROR: Failed to calculate calling rates.")
-        return
-    
-    # Update the output file
-    success = update_output_file(output_path, calling_rate_new, calling_rate_renewals)
+    if process_type == "1":
+        success = process_historical_data(call_volume_path, applications_volume_path, output_path)
+    else:
+        success = process_daily_data(call_volume_path, applications_volume_path, output_path)
     
     if success:
-        print("\n✅ SUCCESS: Daily calling rates have been calculated and saved.")
+        print("\n✅ SUCCESS: Calling rates have been calculated and saved.")
         print("    - New Applications Rate: Call Volumes for 18-64 age groups (sum of rows 53, 54, 55)")
         print("                            divided by Applications for 18-64 (New Applications)")
         print("    - Renewals Rate: Sum of calls for all other age groups (rows 42-48 + row 56)")
         print("                    divided by Applications for 18-64 (Renewals)")
     else:
-        print("\n❌ ERROR: Failed to update the output file.")
+        print("\n❌ ERROR: Failed to complete the calculation.")
 
 if __name__ == "__main__":
     main()
-```
