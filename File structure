@@ -1,23 +1,135 @@
-```python
 import pandas as pd
 import numpy as np
-import sys
 import os
+import sys
 from openpyxl import load_workbook
 from collections import Counter
+import re
 
 # ======================================================================
-# SPECIFY YOUR EXCEL FILE PATH HERE
-# Example: file_path = "C:/Users/YourName/Documents/data.xlsx"
+# CONFIGURATION - EDIT THESE SETTINGS
 # ======================================================================
-file_path = "your_excel_file.xlsx"  # <-- EDIT THIS LINE with your file path
+file_path = "your_excel_file.xlsx"  # <-- EDIT with your file path
+
+# Set to None to analyze all sheets, or specify sheet names/indices
+# Examples: 
+# specific_sheets = None  # Analyze all sheets
+# specific_sheets = ["Sheet1", "Financial Data"]  # Analyze only these sheets
+# specific_sheets = [0, 2]  # Analyze first and third sheets
+specific_sheets = None
+
+# Set to True to generate AI-friendly summary
+ai_summary = True
 # ======================================================================
 
-def analyze_excel_structure(file_path):
+def detect_data_orientation(df, sample_size=10):
+    """Detect if data appears to be in vertical or horizontal format"""
+    # Sample a portion of the dataframe to analyze
+    df_sample = df.iloc[:sample_size, :sample_size] if len(df) > sample_size and len(df.columns) > sample_size else df
+    
+    # Calculate entropy for rows and columns to detect patterns
+    row_entropy = df_sample.apply(lambda x: len(x.unique()) / len(x), axis=1).mean()
+    col_entropy = df_sample.apply(lambda x: len(x.unique()) / len(x), axis=0).mean()
+    
+    # Check for mostly empty cells which often indicates non-tabular data
+    empty_ratio = df_sample.isna().sum().sum() / (df_sample.shape[0] * df_sample.shape[1])
+    
+    if empty_ratio > 0.7:
+        return "sparse_or_non_tabular"
+    elif row_entropy < col_entropy * 0.7:
+        return "horizontal"
+    elif col_entropy < row_entropy * 0.7:
+        return "vertical"
+    else:
+        return "standard_tabular"
+
+def detect_header_row(df, max_check=20):
+    """Try to detect which row contains headers"""
+    # Check the first several rows
+    for i in range(min(max_check, len(df))):
+        row = df.iloc[i]
+        
+        # Check if row has characteristics of headers
+        non_null_ratio = row.count() / len(row)
+        
+        # Headers typically have high percentage of non-null values
+        if non_null_ratio > 0.7:
+            # Headers often have string values
+            string_ratio = sum(isinstance(v, str) for v in row.dropna()) / row.count() if row.count() > 0 else 0
+            
+            # Headers often have uniqueness
+            unique_ratio = len(row.dropna().unique()) / row.count() if row.count() > 0 else 0
+            
+            # Combination of heuristics for header detection
+            if string_ratio > 0.6 and unique_ratio > 0.8:
+                return i
+    
+    # Default to first row if nothing detected
+    return 0
+
+def analyze_non_standard_sheet(ws, sheet_name):
+    """Analyze sheets with non-standard formats"""
+    # Get dimensions
+    max_row = ws.max_row
+    max_col = ws.max_column
+    
+    # Create summary
+    print(f"\nNON-STANDARD LAYOUT DETECTED in '{sheet_name}'")
+    print(f"Dimensions: {max_row} rows × {max_col} columns")
+    
+    # Identify data regions
+    data_regions = []
+    current_region = {'start_row': None, 'start_col': None, 'end_row': None, 'end_col': None}
+    
+    # Sample cells to identify data regions (simplified approach)
+    for row in range(1, min(max_row+1, 50), 5):  # Sample every 5th row
+        for col in range(1, min(max_col+1, 50), 5):  # Sample every 5th column
+            cell_value = ws.cell(row=row, column=col).value
+            if cell_value is not None:
+                # Found data, expand to find region boundaries
+                if current_region['start_row'] is None:
+                    current_region = {
+                        'start_row': max(1, row-5), 
+                        'start_col': max(1, col-5),
+                        'end_row': min(max_row, row+5),
+                        'end_col': min(max_col, col+5)
+                    }
+                    data_regions.append(current_region)
+                    current_region = {'start_row': None, 'start_col': None, 'end_row': None, 'end_col': None}
+    
+    # Report findings
+    if data_regions:
+        print("\nPOTENTIAL DATA REGIONS DETECTED:")
+        for i, region in enumerate(data_regions):
+            print(f"Region {i+1}: Rows {region['start_row']}-{region['end_row']}, Columns {region['start_col']}-{region['end_col']}")
+            
+            # Sample data from this region
+            sample_data = []
+            for r in range(region['start_row'], min(region['start_row']+3, region['end_row']+1)):
+                row_data = []
+                for c in range(region['start_col'], min(region['start_col']+5, region['end_col']+1)):
+                    row_data.append(str(ws.cell(row=r, column=c).value)[:20])
+                sample_data.append(row_data)
+                
+            print("Sample data from this region:")
+            for row in sample_data:
+                print("  | " + " | ".join([str(cell) for cell in row]))
+                
+    print("\nADVICE FOR UNUSUAL FORMATS:")
+    print("- This sheet appears to have a non-standard layout")
+    print("- Consider examining specific cell ranges manually")
+    print("- For AI analysis, it may help to extract data regions to separate sheets")
+
+def analyze_excel_structure(file_path, specific_sheets=None, ai_summary=True):
     """
     Analyze the structure of an Excel file and output a detailed summary.
     Works with multi-sheet Excel files and provides comprehensive information
     about the structure and content.
+    
+    Args:
+        file_path: Path to the Excel file
+        specific_sheets: List of sheet names or indices to analyze, None for all sheets
+        ai_summary: Generate summary specifically for AI understanding
     """
     if not os.path.exists(file_path):
         print(f"Error: File '{file_path}' not found.")
@@ -29,19 +141,50 @@ def analyze_excel_structure(file_path):
     
     # Load the Excel file with openpyxl to get sheet info
     try:
-        workbook = load_workbook(file_path, read_only=True, data_only=True)
-        sheet_names = workbook.sheetnames
-        print(f"\nFile contains {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+        workbook = load_workbook(file_path, read_only=False, data_only=True)
+        all_sheet_names = workbook.sheetnames
+        
+        # Determine which sheets to analyze
+        if specific_sheets is None:
+            sheet_names = all_sheet_names
+        else:
+            sheet_names = []
+            for sheet in specific_sheets:
+                if isinstance(sheet, int) and 0 <= sheet < len(all_sheet_names):
+                    sheet_names.append(all_sheet_names[sheet])
+                elif isinstance(sheet, str) and sheet in all_sheet_names:
+                    sheet_names.append(sheet)
+        
+        print(f"\nFile contains {len(all_sheet_names)} sheets: {', '.join(all_sheet_names)}")
+        print(f"Analyzing {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+        
     except Exception as e:
         print(f"Error reading workbook structure: {str(e)}")
         # Fall back to pandas if openpyxl fails
         try:
             excel_file = pd.ExcelFile(file_path)
-            sheet_names = excel_file.sheet_names
-            print(f"\nFile contains {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+            all_sheet_names = excel_file.sheet_names
+            
+            # Determine which sheets to analyze
+            if specific_sheets is None:
+                sheet_names = all_sheet_names
+            else:
+                sheet_names = []
+                for sheet in specific_sheets:
+                    if isinstance(sheet, int) and 0 <= sheet < len(all_sheet_names):
+                        sheet_names.append(all_sheet_names[sheet])
+                    elif isinstance(sheet, str) and sheet in all_sheet_names:
+                        sheet_names.append(sheet)
+                        
+            print(f"\nFile contains {len(all_sheet_names)} sheets: {', '.join(all_sheet_names)}")
+            print(f"Analyzing {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+            
         except Exception as e:
             print(f"Critical error: Unable to read Excel file: {str(e)}")
             return
+    
+    # Store structured data for AI summary
+    ai_structured_data = {}
     
     # Process each sheet
     for sheet_name in sheet_names:
@@ -49,101 +192,298 @@ def analyze_excel_structure(file_path):
         print(f"SHEET: {sheet_name}")
         print(f"{'-'*80}")
         
+        ai_structured_data[sheet_name] = {"format": "unknown", "columns": [], "stats": {}}
+        
         try:
-            # Load the first few rows to analyze structure
-            df_sample = pd.read_excel(file_path, sheet_name=sheet_name, nrows=5)
+            # First attempt with pandas to get a quick overview
+            # Read without assuming headers first
+            df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
             
-            # Load entire sheet to get row count and statistics
-            df = pd.read_excel(file_path, sheet_name=sheet_name)
-            
-            # Basic sheet information
-            row_count = len(df)
-            col_count = len(df.columns)
-            print(f"\nRows: {row_count}, Columns: {col_count}")
-            
-            # Column information
-            print("\nCOLUMN STRUCTURE:")
-            print(f"{'Index':<8}{'Column Name':<30}{'Data Type':<20}{'Non-Null Values':<20}{'Sample Values'}")
-            print("-" * 100)
-            
-            for i, col in enumerate(df.columns):
-                # Get data type information
-                dtype = str(df[col].dtype)
+            # Check if the dataframe is empty
+            if df_raw.empty:
+                print("\nSheet is empty or contains no visible data.")
+                ai_structured_data[sheet_name]["format"] = "empty"
+                continue
                 
-                # Handle different data types for better insight
-                if dtype.startswith('float'):
-                    # For floats, check if they might actually be integers
-                    if df[col].dropna().apply(lambda x: x.is_integer() if isinstance(x, float) else False).all():
-                        dtype = "float (possible int)"
-                elif dtype.startswith('object'):
-                    # For objects, check what they actually contain
-                    value_types = Counter(type(x).__name__ for x in df[col].dropna().head(50))
-                    most_common_type = value_types.most_common(1)
-                    if most_common_type:
-                        dtype = f"object ({most_common_type[0][0]})"
+            # Detect data orientation
+            orientation = detect_data_orientation(df_raw)
+            ai_structured_data[sheet_name]["format"] = orientation
+            
+            if orientation == "sparse_or_non_tabular":
+                # Use openpyxl for more detailed analysis of non-standard formats
+                ws = workbook[sheet_name]
+                analyze_non_standard_sheet(ws, sheet_name)
+                ai_structured_data[sheet_name]["note"] = "This sheet has an unusual format and may require custom parsing."
+                continue
                 
-                # Count non-null values
-                non_null = df[col].count()
-                null_percentage = (1 - non_null/row_count) * 100 if row_count > 0 else 0
+            # Detect header row for standard tabular data
+            if orientation == "standard_tabular":
+                header_row = detect_header_row(df_raw)
+                if header_row > 0:
+                    print(f"\nDetected header row at index {header_row} (row {header_row+1} in Excel)")
                 
-                # Get sample values (first 3)
-                sample_values = str(df[col].head(3).tolist())
-                if len(sample_values) > 40:
-                    sample_values = sample_values[:37] + "..."
+                # Re-read with the detected header
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+                df_sample = df.head(5)
                 
-                # Print column info
-                print(f"{i:<8}{str(col)[:29]:<30}{dtype:<20}{f'{non_null}/{row_count} ({100-null_percentage:.1f}%)':<20}{sample_values}")
-            
-            # Print first 5 rows as a sample
-            print("\nSAMPLE DATA (First 5 rows):")
-            pd.set_option('display.max_columns', None)
-            pd.set_option('display.width', 1000)
-            print(df_sample)
-            
-            # Basic statistics for numeric columns
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            if numeric_cols:
-                print("\nBASIC STATISTICS FOR NUMERIC COLUMNS:")
-                stats_df = df[numeric_cols].describe().T
-                stats_df = stats_df[['count', 'mean', 'std', 'min', 'max']]
-                print(stats_df)
-            
-            # Detect potential primary keys
-            print("\nPOTENTIAL PRIMARY KEYS:")
-            for col in df.columns:
-                if df[col].count() == row_count:  # No nulls
-                    unique_values = df[col].nunique()
-                    if unique_values == row_count:
-                        print(f"- {col} (unique in all {row_count} rows)")
-            
-            # Check for date columns
-            date_cols = []
-            for col in df.columns:
-                if pd.api.types.is_datetime64_any_dtype(df[col]):
-                    date_cols.append(col)
-            
-            if date_cols:
-                print("\nDATE COLUMNS:")
-                for col in date_cols:
-                    min_date = df[col].min()
-                    max_date = df[col].max()
-                    print(f"- {col}: Range from {min_date} to {max_date}")
-            
+                # Basic sheet information
+                row_count = len(df)
+                col_count = len(df.columns)
+                print(f"\nRows: {row_count}, Columns: {col_count}")
+                print(f"Format: Standard tabular data with headers in row {header_row+1}")
+                
+                ai_structured_data[sheet_name]["rows"] = row_count
+                ai_structured_data[sheet_name]["columns"] = col_count
+                ai_structured_data[sheet_name]["header_row"] = header_row+1
+                
+                # Column information
+                print("\nCOLUMN STRUCTURE:")
+                print(f"{'Index':<8}{'Column Name':<30}{'Data Type':<20}{'Non-Null Values':<20}{'Sample Values'}")
+                print("-" * 100)
+                
+                column_data = []
+                
+                for i, col in enumerate(df.columns):
+                    # Get data type information
+                    dtype = str(df[col].dtype)
+                    
+                    # Handle different data types for better insight
+                    data_type_detail = dtype
+                    if dtype.startswith('float'):
+                        # For floats, check if they might actually be integers
+                        if df[col].dropna().apply(lambda x: x.is_integer() if isinstance(x, float) else False).all():
+                            data_type_detail = "float (possible int)"
+                    elif dtype.startswith('object'):
+                        # For objects, check what they actually contain
+                        value_types = Counter(type(x).__name__ for x in df[col].dropna().head(50))
+                        most_common_type = value_types.most_common(1)
+                        if most_common_type:
+                            data_type_detail = f"object ({most_common_type[0][0]})"
+                    
+                    # Count non-null values
+                    non_null = df[col].count()
+                    null_percentage = (1 - non_null/row_count) * 100 if row_count > 0 else 0
+                    
+                    # Get sample values (first 3)
+                    sample_values = str(df[col].head(3).tolist())
+                    if len(sample_values) > 40:
+                        sample_values = sample_values[:37] + "..."
+                    
+                    # Print column info
+                    col_name = str(col)[:29]
+                    print(f"{i:<8}{col_name:<30}{data_type_detail:<20}{f'{non_null}/{row_count} ({100-null_percentage:.1f}%)':<20}{sample_values}")
+                    
+                    # Store for AI summary
+                    column_data.append({
+                        "index": i,
+                        "name": str(col),
+                        "type": data_type_detail,
+                        "non_null_count": int(non_null),
+                        "null_percentage": float(null_percentage),
+                        "sample_values": df[col].head(3).tolist()
+                    })
+                
+                ai_structured_data[sheet_name]["columns"] = column_data
+                
+                # Print first 5 rows as a sample
+                print("\nSAMPLE DATA (First 5 rows):")
+                pd.set_option('display.max_columns', None)
+                pd.set_option('display.width', 1000)
+                print(df_sample)
+                
+                # Basic statistics for numeric columns
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                if numeric_cols:
+                    print("\nBASIC STATISTICS FOR NUMERIC COLUMNS:")
+                    stats_df = df[numeric_cols].describe().T
+                    stats_df = stats_df[['count', 'mean', 'std', 'min', 'max']]
+                    print(stats_df)
+                    
+                    # Store for AI summary
+                    stats_dict = {}
+                    for col in numeric_cols:
+                        stats_dict[str(col)] = {
+                            "count": float(stats_df.loc[col, 'count']),
+                            "mean": float(stats_df.loc[col, 'mean']) if not pd.isna(stats_df.loc[col, 'mean']) else None,
+                            "std": float(stats_df.loc[col, 'std']) if not pd.isna(stats_df.loc[col, 'std']) else None,
+                            "min": float(stats_df.loc[col, 'min']) if not pd.isna(stats_df.loc[col, 'min']) else None,
+                            "max": float(stats_df.loc[col, 'max']) if not pd.isna(stats_df.loc[col, 'max']) else None
+                        }
+                    ai_structured_data[sheet_name]["stats"] = stats_dict
+                
+                # Detect potential primary keys
+                potential_keys = []
+                print("\nPOTENTIAL PRIMARY KEYS:")
+                for col in df.columns:
+                    if df[col].count() == row_count:  # No nulls
+                        unique_values = df[col].nunique()
+                        if unique_values == row_count:
+                            print(f"- {col} (unique in all {row_count} rows)")
+                            potential_keys.append(str(col))
+                
+                if potential_keys:
+                    ai_structured_data[sheet_name]["potential_keys"] = potential_keys
+                
+                # Check for date columns
+                date_cols = []
+                for col in df.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df[col]):
+                        date_cols.append(col)
+                
+                if date_cols:
+                    date_ranges = {}
+                    print("\nDATE COLUMNS:")
+                    for col in date_cols:
+                        min_date = df[col].min()
+                        max_date = df[col].max()
+                        print(f"- {col}: Range from {min_date} to {max_date}")
+                        date_ranges[str(col)] = {"min": str(min_date), "max": str(max_date)}
+                    
+                    ai_structured_data[sheet_name]["date_ranges"] = date_ranges
+                
+            # For vertical or horizontal data layouts
+            elif orientation in ["vertical", "horizontal"]:
+                print(f"\nDetected {orientation} data layout.")
+                print("This type of layout may need specialized processing.")
+                
+                if orientation == "vertical":
+                    print("\nVERTICAL LAYOUT ANALYSIS:")
+                    # Try to identify key-value pairs in the first column
+                    first_col = df_raw.iloc[:, 0].dropna()
+                    print(f"Potential keys in first column (showing first 10):")
+                    for i, key in enumerate(first_col.head(10)):
+                        value = df_raw.iloc[i, 1] if len(df_raw.columns) > 1 else "N/A"
+                        print(f"- {key}: {value}")
+                        
+                    # Look for patterns in vertical layout
+                    if len(df_raw) > 10:
+                        pattern_check = [str(x).strip() for x in df_raw.iloc[:10, 0]]
+                        repeats = [i for i, (a, b) in enumerate(zip(pattern_check[:-1], pattern_check[1:])) if a == b]
+                        if repeats:
+                            print(f"\nPossible repeating pattern detected at row(s): {[r+1 for r in repeats]}")
+                    
+                    ai_structured_data[sheet_name]["potential_keys"] = first_col.head(10).tolist()
+                    
+                elif orientation == "horizontal":
+                    print("\nHORIZONTAL LAYOUT ANALYSIS:")
+                    # Try to identify key-value pairs in the first row
+                    first_row = df_raw.iloc[0, :].dropna()
+                    print(f"Potential keys in first row (showing first 10):")
+                    for i, key in enumerate(first_row.head(10)):
+                        value = df_raw.iloc[1, i] if len(df_raw) > 1 else "N/A"
+                        print(f"- {key}: {value}")
+                        
+                    # Look for patterns in horizontal layout
+                    if len(df_raw.columns) > 10:
+                        pattern_check = [str(x).strip() for x in df_raw.iloc[0, :10]]
+                        repeats = [i for i, (a, b) in enumerate(zip(pattern_check[:-1], pattern_check[1:])) if a == b]
+                        if repeats:
+                            print(f"\nPossible repeating pattern detected at column(s): {[chr(65+r) for r in repeats]}")
+                    
+                    ai_structured_data[sheet_name]["potential_keys"] = first_row.head(10).tolist()
+                
+                # Show a raw sample of the data
+                print("\nRAW DATA SAMPLE (first 5 rows × 5 columns):")
+                print(df_raw.iloc[:5, :5])
+                
+                ai_structured_data[sheet_name]["sample"] = df_raw.iloc[:5, :5].values.tolist()
+                
         except Exception as e:
             print(f"Error analyzing sheet '{sheet_name}': {str(e)}")
+            ai_structured_data[sheet_name]["error"] = str(e)
 
+    # Generate AI-friendly summary if requested
+    if ai_summary:
+        print(f"\n{'='*80}")
+        print(f"AI-FRIENDLY SUMMARY")
+        print(f"{'='*80}")
+        print("\nAI STRUCTURE ANALYSIS:")
+        
+        # Generate overall structure summary
+        print(f"\nThe Excel file '{os.path.basename(file_path)}' contains {len(sheet_names)} analyzed sheets.")
+        
+        for sheet_name in sheet_names:
+            sheet_data = ai_structured_data[sheet_name]
+            
+            print(f"\n## SHEET: {sheet_name}")
+            
+            if sheet_data["format"] == "empty":
+                print("This sheet is empty or contains no visible data.")
+                continue
+                
+            if sheet_data["format"] == "sparse_or_non_tabular":
+                print("This sheet has an unusual, non-tabular format that may require custom parsing.")
+                if "note" in sheet_data:
+                    print(sheet_data["note"])
+                continue
+                
+            if sheet_data["format"] == "standard_tabular":
+                print(f"Format: Standard tabular data with {sheet_data['rows']} rows and {sheet_data['columns']} columns")
+                print(f"Headers are located in row {sheet_data['header_row']}")
+                
+                if len(sheet_data["columns"]) > 0:
+                    print("\nKey columns:")
+                    for col in sheet_data["columns"][:5]:  # Show first 5 columns
+                        print(f"- {col['name']}: {col['type']} (non-null: {col['non_null_count']}, sample: {col['sample_values']})")
+                    
+                    if len(sheet_data["columns"]) > 5:
+                        print(f"... and {len(sheet_data['columns'])-5} more columns")
+                
+                if "potential_keys" in sheet_data and sheet_data["potential_keys"]:
+                    print(f"\nPotential primary key column(s): {', '.join(sheet_data['potential_keys'])}")
+                
+                if "date_ranges" in sheet_data:
+                    print("\nDate columns:")
+                    for col, ranges in sheet_data["date_ranges"].items():
+                        print(f"- {col}: from {ranges['min']} to {ranges['max']}")
+                        
+            elif sheet_data["format"] in ["vertical", "horizontal"]:
+                print(f"Format: {sheet_data['format'].capitalize()} data layout (non-standard)")
+                
+                if "potential_keys" in sheet_data:
+                    if sheet_data["format"] == "vertical":
+                        print("\nFirst column contains potential keys/fields:")
+                    else:
+                        print("\nFirst row contains potential keys/fields:")
+                        
+                    # Show some of the potential keys
+                    for i, key in enumerate(sheet_data["potential_keys"][:5]):
+                        print(f"- {key}")
+                        
+                    if len(sheet_data["potential_keys"]) > 5:
+                        print(f"... and {len(sheet_data['potential_keys'])-5} more fields")
+    
     print(f"\n{'='*80}")
     print("ANALYSIS COMPLETE")
     print(f"{'='*80}")
+    
+    if ai_summary:
+        print("\nAI USAGE GUIDE:")
+        print("1. The summary above provides a structured overview of the Excel file's contents")
+        print("2. For standard tabular sheets, columns with their data types and sample values are shown")
+        print("3. For non-standard layouts, the format is described for appropriate parsing strategies")
+        print("4. When working with this data in your model, consider the sheet format for proper handling")
+        print(f"5. If analyzing a specific sheet (e.g., '{sheet_names[0]}'), refer to its structure as described above")
 
 if __name__ == "__main__":
-    # First check if a file path was provided via command line
+    # Check command line arguments first
     if len(sys.argv) > 1:
         file_path = sys.argv[1]
+        
+        # Look for sheet specifications
+        sheet_arg = None
+        if len(sys.argv) > 2:
+            sheet_arg = sys.argv[2]
+            try:
+                # Check if it's an index
+                sheet_arg = int(sheet_arg)
+            except ValueError:
+                # Keep as string (sheet name)
+                pass
+            specific_sheets = [sheet_arg]
     
-    # Then use the file_path variable (either from the top of the script or command line)
+    # Run analysis
     if file_path and file_path != "your_excel_file.xlsx":
-        analyze_excel_structure(file_path)
+        analyze_excel_structure(file_path, specific_sheets, ai_summary)
     else:
         print("Please specify your Excel file path by editing the 'file_path' variable at the top of the script.")
-```
