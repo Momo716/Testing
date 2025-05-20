@@ -1,128 +1,142 @@
-/* STEP 1 – Confirmed DTC clients */
-WITH dtc_clients AS
-(
+/* ============================================================
+   CDCP – Daily applicant funnel
+   Author: …you :)
+   Last edit: 2025‑05‑20
+   ============================================================*/
+
+SET NOCOUNT ON;
+
+/* ---- 1.  Parameters ---------------------------------------*/
+DECLARE @start_date  DATE = '2025-01-01';   -- inclusive
+DECLARE @end_date    DATE = '2025-05-02';   -- exclusive upper bound (end_date + 1)
+
+/* ---- 2.  Confirmed DTC clients ----------------------------*/
+WITH dtc_clients AS (
     SELECT DISTINCT esdc_clientid
     FROM OPENROWSET(
             BULK 'https://dfpprodcordedpn2ztest01.dfs.core.windows.net/oph-cdcp/prod/standardized/esdc_clientearning/delta/',
             FORMAT = 'PARQUET'
          )
          WITH (
-                esdc_clientid           VARCHAR(100),
-                esdc_disabilitytaxcredit INT
-              ) AS c
+              esdc_clientid           VARCHAR(100),
+              esdc_disabilitytaxcredit INT
+         ) AS src
     WHERE esdc_disabilitytaxcredit = 1
-)
-/* quick sanity‑check */
-SELECT COUNT(*) AS dtc_clients_cnt FROM dtc_clients;
+),
 
-/* STEP 2 – Clients flagged as renewals */
-WITH renewals AS
-(
-    SELECT DISTINCT esdc_clientid
+/* ---- 3.  Renewal flag -------------------------------------*/
+renewals AS (
+    SELECT DISTINCT esdc_clientid      /* NULLs automatically disappear */
     FROM OPENROWSET(
             BULK 'https://dfpprodcordedpn2ztest01.dfs.core.windows.net/oph-cdcp/prod/standardized/esdc_dentalapplication/delta/',
             FORMAT = 'PARQUET'
          )
          WITH (
-                esdc_clientid   VARCHAR(100),
-                esdc_renewalname VARCHAR(10)
-              ) AS da
+              esdc_clientid    VARCHAR(100),
+              esdc_renewalname VARCHAR(10)
+         ) AS src
     WHERE esdc_renewalname = 'Yes'
-)
-SELECT COUNT(*) AS renewals_cnt FROM renewals;
+      AND esdc_clientid IS NOT NULL            -- <= avoid NULL poison
+),
 
-/* STEP 3 – Deduped applicants */
-WITH deduped_applicants AS
-(
+/* ---- 4.  Applicants – keep latest file per client ---------*/
+deduped_applicants AS (
     SELECT  esdc_clientid,
             esdc_attestationcompletedon,
             esdc_dateofbirth,
             esdc_eligibilitystatus,
             statuscode,
             esdc_applicanttype,
-            ROW_NUMBER() OVER (PARTITION BY esdc_clientid
-                               ORDER BY esdc_attestationcompletedon DESC) AS rn
+            ROW_NUMBER() OVER (
+                 PARTITION BY esdc_clientid
+                 ORDER BY     esdc_attestationcompletedon DESC
+            ) AS rn
     FROM OPENROWSET(
             BULK 'https://dfpprodcordedpn2ztest01.dfs.core.windows.net/oph-cdcp/prod/standardized/esdc_dentalapplicant/delta/',
             FORMAT = 'PARQUET'
          )
          WITH (
-                esdc_clientid              VARCHAR(100),
-                esdc_attestationcompletedon DATETIME,
-                esdc_dateofbirth           DATE,
-                esdc_eligibilitystatus     INT,
-                statuscode                 INT,
-                esdc_attestationcomplete   INT,
-                esdc_applicanttype         INT
-              ) AS da
+              esdc_clientid               VARCHAR(100),
+              esdc_attestationcompletedon DATETIME,
+              esdc_dateofbirth            DATE,
+              esdc_eligibilitystatus      INT,
+              statuscode                  INT,
+              esdc_attestationcomplete    INT,
+              esdc_applicanttype          INT
+         ) AS src
     WHERE esdc_attestationcomplete = 1
-      AND esdc_attestationcompletedon >= '2025-01-01'
-      AND esdc_attestationcompletedon <  '2025-05-01'  -- exclusive upper bound
-)
-SELECT COUNT(*) AS deduped_cnt
-FROM deduped_applicants
-WHERE rn = 1;   -- only latest per client
+      AND esdc_attestationcompletedon >= @start_date
+      AND esdc_attestationcompletedon <  @end_date
+),
 
-/* STEP 4 – Join with DTC list + cohort classification */
-WITH dtc_clients AS ( … )       -- same as Step 1
-,    renewals     AS ( … )       -- same as Step 2
-,    deduped_applicants AS ( … ) -- same as Step 3 (include rn filter)
-
-, classified_applicants AS
-(
+/* ---- 5.  Cohort classification ----------------------------*/
+classified_applicants AS (
     SELECT  da.esdc_clientid,
-            CAST(da.esdc_attestationcompletedon AS DATE) AS [Date],
+            CAST(da.esdc_attestationcompletedon AS DATE)                AS [Date],
 
-            /* cohort rules */
+            /* age at attestation */
+            DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon)
+                - CASE
+                    WHEN DATEFROMPARTS(YEAR(da.esdc_attestationcompletedon),
+                                       MONTH(da.esdc_dateofbirth),
+                                       DAY(da.esdc_dateofbirth))
+                         > CAST(da.esdc_attestationcompletedon AS DATE)
+                    THEN 1 ELSE 0
+                  END                                                   AS Age,
+
+            /* cohort bucket */
             CASE
                 WHEN dc.esdc_clientid IS NOT NULL                                   THEN 'DTC'
-                WHEN DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon) < 18 THEN 'Child/Family'
-                WHEN DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon) BETWEEN 65 AND 69 THEN '65-69'
-                WHEN DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon) BETWEEN 70 AND 71 THEN '70-71'
-                WHEN DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon) BETWEEN 72 AND 76 THEN '72-76'
-                WHEN DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon) BETWEEN 77 AND 86 THEN '77-86'
-                WHEN DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon)  > 87 THEN '87+'
-                ELSE NULL
-            END                                                             AS Cohort,
+                WHEN DATEDIFF(YEAR, da.esdc_dateofbirth, da.esdc_attestationcompletedon) < 18  THEN 'Child/Family'
+                WHEN Age BETWEEN 65 AND 69 THEN '65‑69'
+                WHEN Age BETWEEN 70 AND 71 THEN '70‑71'
+                WHEN Age BETWEEN 72 AND 76 THEN '72‑76'
+                WHEN Age BETWEEN 77 AND 86 THEN '77‑86'
+                WHEN Age  > 87               THEN '87+'
+                ELSE 'Unclassified'
+            END                                                   AS Cohort,
 
             da.esdc_eligibilitystatus,
             da.statuscode,
-            CASE WHEN dc.esdc_clientid IS NOT NULL THEN 1 ELSE 0 END        AS is_dtc_confirmed
+            CASE WHEN dc.esdc_clientid IS NOT NULL THEN 1 ELSE 0 END  AS is_dtc_confirmed
     FROM deduped_applicants da
-    LEFT JOIN dtc_clients dc ON da.esdc_clientid = dc.esdc_clientid
-    WHERE rn = 1                                           -- keep only latest
-      AND da.esdc_clientid NOT IN (SELECT esdc_clientid FROM renewals)
-)
-SELECT Cohort, COUNT(*) AS classified_cnt
-FROM classified_applicants
-GROUP BY Cohort;
+    LEFT JOIN dtc_clients dc
+           ON da.esdc_clientid = dc.esdc_clientid
+    /* keep latest record per client only */
+    WHERE rn = 1
+      /* exclude renewals */
+      AND NOT EXISTS (
+            SELECT 1
+            FROM renewals r
+            WHERE r.esdc_clientid = da.esdc_clientid
+      )
+),
 
-/* STEP 5 – Filter out confirmed‑DTC records that belong EXCLUSIVELY to DTC cohort */
-WITH classified_applicants AS ( … )   -- from Step 4
-
-, final_applicants AS
-(
+/* ---- 6.  Optionally remove pure‑DTC records ---------------*/
+final_applicants AS (
     SELECT *
     FROM classified_applicants
+    /* comment the WHERE clause out if you need raw numbers   */
     WHERE NOT (Cohort = 'DTC' AND is_dtc_confirmed = 1)
 )
-SELECT COUNT(*) AS final_cnt FROM final_applicants;
 
-/* STEP 6 – Aggregate results */
-WITH final_applicants AS ( … )   -- from Step 5
-
+/* ---- 7.  Daily roll‑up ------------------------------------*/
 SELECT  [Date],
         Cohort,
-        COUNT(*)                                                             AS Applications_Received,
+        COUNT(*)                                                               AS Applications_Received,
         SUM(CASE WHEN esdc_eligibilitystatus IS NOT NULL
-                  OR statuscode = 775170006 THEN 1 ELSE 0 END)               AS Applications_Completed,
+                  OR statuscode = 775170006 THEN 1 ELSE 0 END)                 AS Applications_Completed,
         SUM(CASE WHEN esdc_eligibilitystatus = 775170000
-                  AND is_dtc_confirmed = 1 THEN 1 ELSE 0 END)                AS Eligible_Applications
+                  AND is_dtc_confirmed = 1 THEN 1 ELSE 0 END)                  AS Eligible_Applications
 FROM final_applicants
 GROUP BY [Date], Cohort
 ORDER BY [Date], Cohort;
 
 
+
+/* ---- 8.  (optional) quick waterfall check -----------------
+   Uncomment to see where rows fall out
+----------------------------------------------------------------
 SELECT 'dtc_clients'           AS step, COUNT(*) FROM dtc_clients
 UNION ALL
 SELECT 'renewals',                  COUNT(*) FROM renewals
@@ -132,3 +146,4 @@ UNION ALL
 SELECT 'classified_applicants',     COUNT(*) FROM classified_applicants
 UNION ALL
 SELECT 'final_applicants',          COUNT(*) FROM final_applicants;
+----------------------------------------------------------------*/
