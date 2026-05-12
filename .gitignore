@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+data/sft_*.jsonl
+*.zip
