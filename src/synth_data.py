@@ -93,11 +93,44 @@ def _cipher_puzzle(rng: random.Random) -> tuple[str, str]:
     return body, query_plain
 
 
+def _bit_manip_puzzle(rng: random.Random) -> tuple[str, str]:
+    """Generate an 8-bit puzzle with a rule sampled from a documented library."""
+    # Pick a rule from the same families our solver searches
+    ROT = lambda x, k: ((x << k) | (x >> (8 - k))) & 0xFF
+    SHR = lambda x, k: x >> k
+    SHL = lambda x, k: (x << k) & 0xFF
+    NOT = lambda x: (~x) & 0xFF
+    REV = lambda x: int(f"{x:08b}"[::-1], 2)
+    families = [
+        ("rotate_left", lambda x, k=rng.randint(1, 7): ROT(x, k)),
+        ("rotate_right", lambda x, k=rng.randint(1, 7): (x >> k) | ((x << (8 - k)) & 0xFF)),
+        ("xor_const", lambda x, c=rng.randint(1, 255): x ^ c),
+        ("not", NOT),
+        ("rot_xor_const", lambda x, k=rng.randint(1, 7), c=rng.randint(0, 255): ROT(x, k) ^ c),
+        ("sigma", lambda x, a=rng.randint(0, 7), b=rng.randint(1, 7): ROT(x, a) ^ ROT(x, b) ^ SHR(x, rng.randint(1, 7))),
+        ("rev_xor_const", lambda x, c=rng.randint(0, 255): REV(x) ^ c),
+        ("majority", lambda x, j=rng.randint(1, 3), k=rng.randint(4, 6): (x & ROT(x, j)) | (x & ROT(x, k)) | (ROT(x, j) & ROT(x, k))),
+        ("xor_rot",  lambda x, k=rng.randint(1, 7): x ^ ROT(x, k)),
+        ("and_rot",  lambda x, k=rng.randint(1, 7): x & ROT(x, k)),
+    ]
+    name, fn = rng.choice(families)
+    inputs = rng.sample(range(256), rng.randint(7, 9))
+    query = rng.randint(0, 255)
+    while query in inputs:
+        query = rng.randint(0, 255)
+    pairs = [(i, fn(i)) for i in inputs]
+    body = "In Alice's Wonderland, a secret bit manipulation rule transforms 8-bit binary numbers. The transformation involves operations like bit shifts, rotations, XOR, AND, OR, NOT, and possibly majority or choice functions.\n\nHere are some examples of input -> output:\n"
+    body += "\n".join(f"{a:08b} -> {b:08b}" for a, b in pairs)
+    body += f"\n\nNow, determine the output for: {query:08b}"
+    return body, f"{fn(query):08b}"
+
+
 GENERATORS = {
     "roman": _roman_puzzle,
     "unit_conv": _unit_conv_puzzle,
     "physics": _physics_puzzle,
     "cipher": _cipher_puzzle,
+    "bit_manip": _bit_manip_puzzle,
 }
 
 
@@ -121,6 +154,7 @@ def main():
                     "unit_conv": "The conversion is linear y = a*x + b; fit a and b on examples and apply to the query.",
                     "physics": "Each example gives a (t, d) pair under d = 0.5*g*t^2; fit g and evaluate at the query t.",
                     "cipher": "Each example exposes a character-level substitution; build the map and apply it letter-by-letter.",
+                    "bit_manip": "Each output bit is a function of input bits (rotation/shift/XOR/AND/OR/NOT/majority). Search a small library for the rule that fits all examples, then apply to the query.",
                 }[cat]
                 assistant = f"{cot}\n\nFinal answer: \\boxed{{{answer}}}"
                 rec = {
