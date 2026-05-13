@@ -1,17 +1,29 @@
 """Build the SFT JSONL dataset for LoRA training.
 
-For every training example we emit a single (system, user, assistant) record:
-- system: short instruction telling the model to reason and box the answer.
-- user: the original puzzle prompt.
-- assistant: chain-of-thought reasoning + final \\boxed{answer}.
+Output format matches the Nemotron-3-Nano-30B-A3B chat template (ChatML +
+`<think>` tags), which is what the model was pretrained on. The training
+notebook will call `tokenizer.apply_chat_template(..., enable_thinking=True)`
+to wrap the user content; the assistant completion is just the reasoning
+followed by `</think>\\boxed{answer}<|im_end|>`.
+
+Reference: the winning Progress Prize submission by huikang
+(https://github.com/tonghuikang/nemotron) uses this exact wrapping with
+`enable_thinking=True` and the completion suffix `</think>\\boxed{...}<|im_end|>`.
+
+Each output record schema:
+    {
+      "user": <user message string>,
+      "completion": <reasoning></think>\\boxed{answer}<|im_end|>,
+      "category": one of CATEGORIES,
+      "verified_cot": True/False,
+    }
 
 CoT generation policy
 ---------------------
 1. Run the symbolic solver. If its prediction matches the ground-truth answer,
    we use the solver's reasoning steps (verified CoT).
 2. If the solver fails or disagrees, we fall back to a short generic CoT that
-   names the category and still emits the correct \\boxed{answer}. This still
-   teaches the model the answer format and the per-category style.
+   names the category and still emits the correct \\boxed{answer}.
 """
 from __future__ import annotations
 
@@ -25,10 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.categorize import categorize
 from src.solvers import solve
 
-SYSTEM_PROMPT = (
-    "You are a careful reasoning assistant. Solve the puzzle step by step, "
-    "show your work briefly, then put the final answer inside \\boxed{...}."
-)
+USER_SUFFIX = "\n\nPlease put your final answer inside `\\boxed{}`."
 
 GENERIC_TEMPLATES = {
     "bit_manip": (
@@ -55,9 +64,10 @@ GENERIC_TEMPLATES = {
         "as the examples confirm. I convert the requested number directly."
     ),
     "algebra": (
-        "The examples reveal a per-symbol rewrite rule (and possibly the "
-        "removal of operator characters). I infer the mapping and apply it "
-        "to the query expression."
+        "The puzzle is a cryptarithm: each unique symbol maps bijectively "
+        "to a digit, and the operator symbol maps to one of {add, abs_diff, "
+        "mul, concat, rev_concat}. I infer the mapping from examples and "
+        "apply it to the query."
     ),
 }
 
@@ -72,26 +82,24 @@ def _approx_match(pred: str, gt: str) -> bool:
         return False
 
 
-def build_assistant_text(prompt: str, gt_answer: str) -> tuple[str, bool]:
-    """Returns (assistant_text, verified)."""
+def build_record(prompt: str, gt_answer: str) -> dict:
+    """Return a record matching huikang's training corpus format."""
     pred, cat, steps = solve(prompt)
     verified = pred is not None and _approx_match(pred, gt_answer)
-    if verified:
-        body = " ".join(steps)
-    else:
-        body = GENERIC_TEMPLATES.get(cat, "I analyze the examples and apply the inferred rule to the query.")
-    return f"{body}\n\nFinal answer: \\boxed{{{gt_answer}}}", verified
+    reasoning = " ".join(steps) if verified else GENERIC_TEMPLATES.get(
+        cat, "I analyze the examples and apply the inferred rule to the query."
+    )
 
+    user = prompt + USER_SUFFIX
+    # The opening "<think>\n" is added by apply_chat_template with
+    # enable_thinking=True. So the completion starts with reasoning content
+    # directly, then closes </think> and emits the boxed answer.
+    completion = f"{reasoning}</think>\\boxed{{{gt_answer}}}<|im_end|>"
 
-def make_record(prompt: str, gt: str) -> dict:
-    assistant, verified = build_assistant_text(prompt, gt)
     return {
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": assistant},
-        ],
-        "category": categorize(prompt),
+        "user": user,
+        "completion": completion,
+        "category": cat,
         "verified_cot": verified,
     }
 
@@ -106,7 +114,7 @@ def main():
     n_verified = 0
     with open(args.train) as fi, open(args.out, "w") as fo:
         for row in csv.DictReader(fi):
-            rec = make_record(row["prompt"], row["answer"])
+            rec = build_record(row["prompt"], row["answer"])
             fo.write(json.dumps(rec) + "\n")
             n_total += 1
             n_verified += int(rec["verified_cot"])

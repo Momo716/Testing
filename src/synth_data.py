@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.solvers import _to_roman
-from src.build_sft_dataset import SYSTEM_PROMPT
+from src.build_sft_dataset import USER_SUFFIX
 
 
 def _roman_puzzle(rng: random.Random) -> tuple[str, str]:
@@ -156,13 +156,10 @@ def main():
                     "cipher": "Each example exposes a character-level substitution; build the map and apply it letter-by-letter.",
                     "bit_manip": "Each output bit is a function of input bits (rotation/shift/XOR/AND/OR/NOT/majority). Search a small library for the rule that fits all examples, then apply to the query.",
                 }[cat]
-                assistant = f"{cot}\n\nFinal answer: \\boxed{{{answer}}}"
+                completion = f"{cot}</think>\\boxed{{{answer}}}<|im_end|>"
                 rec = {
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": assistant},
-                    ],
+                    "user": prompt + USER_SUFFIX,
+                    "completion": completion,
                     "category": cat,
                     "verified_cot": True,
                     "synthetic": True,

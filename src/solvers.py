@@ -604,14 +604,59 @@ def solve_roman(prompt: str) -> Result:
 _EQ_RE_CRYPTO = re.compile(r"^(\S{5})\s*=\s*(\S{1,4})\s*$")
 _QUESTION_RE_CRYPTO = re.compile(r"determine\s+the\s+result\s+for:\s*(\S{5})\s*$")
 
+def _digit_sum(a, b):
+    return sum(int(d) for d in f"{a}{b}")
+
+
+def _digit_prod(a, b):
+    p = 1
+    for d in f"{a}{b}":
+        p *= int(d)
+    return p
+
+
+def _pairwise_sum(a, b):
+    """Pairwise digit sum: tens-digit + units-digit of each, then concat."""
+    return (a // 10 + b // 10) * 10 + (a % 10 + b % 10)
+
+
+def _pairwise_prod(a, b):
+    """Pairwise digit product, concat."""
+    return (a // 10 * (b // 10)) * 100 + (a % 10 * (b % 10))
+
+
+def _square(a, b):
+    return a * a + b * b
+
+
+def _diff_sq(a, b):
+    return (a - b) ** 2
+
+
 _CRYPTO_OPS = (
     lambda a, b: a + b,        # 0: add
     lambda a, b: abs(a - b),   # 1: abs_diff
     lambda a, b: a * b,        # 2: mul
-    lambda a, b: a * 100 + b,  # 3: concat   (4-char output for 2x2-digit inputs)
+    lambda a, b: a * 100 + b,  # 3: concat
     lambda a, b: b * 100 + a,  # 4: rev_concat
+    lambda a, b: a + b * 10,   # 5: weighted_add
+    lambda a, b: a * 10 + b,   # 6: shift_concat
+    _digit_sum,                # 7: digit_sum
+    _digit_prod,               # 8: digit_prod
+    _pairwise_sum,             # 9: pairwise_sum
+    _pairwise_prod,            # 10: pairwise_prod
+    _square,                   # 11: square_sum
+    _diff_sq,                  # 12: diff_squared
+    lambda a, b: a ^ b,        # 13: xor (small ints)
+    lambda a, b: a | b,        # 14: or
+    lambda a, b: a & b,        # 15: and
 )
-_CRYPTO_OP_NAMES = ("add", "abs_diff", "mul", "concat", "rev_concat")
+_CRYPTO_OP_NAMES = (
+    "add", "abs_diff", "mul", "concat", "rev_concat",
+    "weighted_add", "shift_concat", "digit_sum", "digit_prod",
+    "pairwise_sum", "pairwise_prod", "square_sum", "diff_squared",
+    "xor", "or", "and",
+)
 
 
 def _crypto_parse(prompt: str):
@@ -690,10 +735,16 @@ class _CryptoSolver:
             self.used.discard(d)
 
     def _result_digits(self, op_id, left, right):
-        v = _CRYPTO_OPS[op_id](left, right)
-        if op_id >= 3:
-            if v < 0 or v >= 10000:
-                return None
+        try:
+            v = _CRYPTO_OPS[op_id](left, right)
+        except Exception:
+            return None
+        if v is None or v < 0 or v >= 10000:
+            return None
+        # Fixed-width ops (concat, rev_concat, shift_concat, pairwise_*) emit
+        # exactly 4 digits with leading zeros; everything else uses the natural
+        # decimal width.
+        if op_id in (3, 4, 6, 9, 10):
             return (v // 1000, (v // 100) % 10, (v // 10) % 10, v % 10)
         return _crypto_num_digits(v)
 
@@ -706,11 +757,18 @@ class _CryptoSolver:
             return
         s0, s1, op_sym, s3, s4, rsyms = self.examples[idx]
         rlen = len(rsyms)
+        # Per-op result-length buckets:
+        # rlen 1-4 variable: add(0), abs_diff(1), mul(2), weighted_add(5), shift_concat(6),
+        #                    digit_sum(7), digit_prod(8), square_sum(11), diff_squared(12),
+        #                    xor(13), or(14), and(15)
+        # rlen exactly 4 (zero-padded): concat(3), rev_concat(4), pairwise_sum(9), pairwise_prod(10)
         feasible_ops = []
         if rlen <= 3: feasible_ops.append(0)
-        if rlen <= 2: feasible_ops.append(1)
+        if rlen <= 2: feasible_ops += [1, 7]
         if rlen <= 4: feasible_ops.append(2)
-        if rlen == 4: feasible_ops += [3, 4]
+        if rlen == 4: feasible_ops += [3, 4, 9, 10]
+        if rlen <= 3: feasible_ops += [5, 6, 11, 12]
+        if rlen <= 2: feasible_ops += [8, 13, 14, 15]
         for d0 in self._vals(s0):
             n0 = self._assign(s0, d0)
             if n0 is None: continue

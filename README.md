@@ -2,8 +2,14 @@
 
 This repo turns the Wonderland reasoning benchmark into a **verified-CoT
 supervised fine-tuning** dataset for a rank-32 LoRA adapter on
-`nvidia/Nemotron-3-Nano-30B`, then trains and packages a competition
-submission.
+`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`, then trains and packages a
+competition submission.
+
+The training pipeline format (chat template with `<think>` tags, completion
+suffix `</think>\boxed{...}<|im_end|>`, model path, LoRA targets) matches
+the **Progress Prize winning recipe by huikang** (`github.com/tonghuikang/nemotron`)
+so this scaffold can be used either standalone (Path A) or as a polish pass
+on top of his public adapter (Path C, recommended for a top-3 attempt).
 
 ## Headline numbers (verified CoT coverage on train)
 
@@ -14,8 +20,8 @@ submission.
 | cipher      | **100.0%** (1576 / 1576) |
 | unit_conv   | **99.9%**  (1593 / 1594) |
 | bit_manip   | **52.8%**  (846 / 1602)  |
-| algebra     | **7.8%**   (122 / 1555)  |
-| **overall** | **76.9%**  (7310 / 9500) |
+| algebra     | **8.0%**   (125 / 1555)  |
+| **overall** | **77.0%**  (7313 / 9500) |
 
 That 76.9% becomes high-quality teacher-forced chain-of-thought used to
 fine-tune the model. The remaining 23.1% still gets the correct boxed
@@ -43,22 +49,27 @@ LoRA adapter. **Read both before deciding.**
   time.
 * How: follow steps 1–5 below.
 
-### Path B — Start from a public pre-trained adapter (e.g. `huikang/nemotron-adapter`) and patch
+### Path B — Start from huikang's public adapter and patch
 
 * Time: ~30 min on Kaggle (no training, only SVD compression to rank-32).
-* Expected leaderboard: **~0.86** (matches the public reference).
+* Expected leaderboard: **~0.85–0.86** (matches public references).
 * Pros: known top-tier score immediately available.
-* Cons: depends on a third-party adapter (verify license / origin); less
-  competitive for the "Best Fine-tuning Method" award since you did not
-  train it yourself.
-* How: clone the public notebook directly. The participant
-  `glyphmatics` published a complete recipe; see `WRITEUP.md` for
-  attribution and reproduction details.
+* Cons: depends on a third-party adapter; less competitive for the "Best
+  Fine-tuning Method" award since you did not train it yourself.
+* How: clone the public Kaggle notebook
+  `https://www.kaggle.com/code/huikang/end-to-end-finetuning-for-lb-0-85`
+  directly, fork it, run all.
 
-A **hybrid** is also viable: start from the public adapter (Path B) then
-do a short additional SFT pass on our verified-CoT dataset to capture
-extra wins on cipher / algebra. This is the highest-upside option but
-requires care to avoid catastrophic forgetting.
+### Path C — Hybrid (RECOMMENDED for winning)
+
+1. Start from huikang's public adapter as a warm-start.
+2. Apply one extra short SFT pass on **our** verified-CoT dataset using
+   `notebooks/01_train_lora.py` with `learning_rate=5e-5` and
+   `num_train_epochs=1` to capture our cipher → 100% wins and our
+   16-op cryptarithm coverage without forgetting his weights.
+3. Submit the resulting compressed-to-rank-32 adapter.
+* Time: ~2 h.
+* Expected: **0.87+** — best realistic shot at top-3.
 
 ## Layout
 

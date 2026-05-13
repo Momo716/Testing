@@ -1,11 +1,9 @@
 """
 Local inference sanity check for the trained LoRA adapter.
 
-The competition grades submissions by loading the adapter under vLLM and
-prompting the model on the hidden test set; this script reproduces that path
-on the public test.csv so you can estimate score before submitting.
-
-Run on Kaggle after 01_train_lora.py has produced /kaggle/working/lora_adapter.
+Reproduces the grader's exact vLLM pipeline locally. Uses the same chat
+template (enable_thinking=True) the model was trained with, then extracts
+the final \\boxed{...} answer.
 """
 
 # %%
@@ -17,23 +15,25 @@ import re
 import json
 from pathlib import Path
 
+from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "nvidia/Nemotron-3-Nano-30B"
-ADAPTER_DIR = "/kaggle/working/lora_adapter"
-TEST_CSV = "/kaggle/input/wonderland-sft/test.csv"  # or path to the competition test set
+MODEL_NAME = "/kaggle/input/nemotron-3-nano-30b-a3b-bf16/transformers/default"
+if not Path(MODEL_NAME).exists():
+    MODEL_NAME = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 
+ADAPTER_DIR = "/kaggle/working/lora_adapter"
+TEST_CSV = "/kaggle/input/wonderland-sft/test.csv"
+
+# Grader's exact parameters
 SAMPLING = SamplingParams(
     temperature=0.0,
     top_p=1.0,
     max_tokens=7680,
 )
 
-SYSTEM_PROMPT = (
-    "You are a careful reasoning assistant. Solve the puzzle step by step, "
-    "show your work briefly, then put the final answer inside \\boxed{...}."
-)
+USER_SUFFIX = "\n\nPlease put your final answer inside `\\boxed{}`."
 
 # %%
 llm = LLM(
@@ -45,15 +45,16 @@ llm = LLM(
     max_model_len=8192,
 )
 lora_req = LoRARequest("wonderland", 1, ADAPTER_DIR)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 # %%
-def build_chat(prompt: str) -> str:
-    # Use the same chat template as training. If your tokenizer has
-    # apply_chat_template, prefer that.
-    return (
-        "<|system|>\n" + SYSTEM_PROMPT + "\n"
-        "<|user|>\n" + prompt + "\n"
-        "<|assistant|>\n"
+def build_prompt(puzzle: str) -> str:
+    """Wrap the puzzle in Nemotron's chat template with thinking enabled."""
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": puzzle + USER_SUFFIX}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,
     )
 
 
@@ -71,7 +72,7 @@ def extract_answer(text: str) -> str:
 
 # %%
 rows = list(csv.DictReader(open(TEST_CSV)))
-prompts = [build_chat(r["prompt"]) for r in rows]
+prompts = [build_prompt(r["prompt"]) for r in rows]
 
 outputs = llm.generate(prompts, SAMPLING, lora_request=lora_req)
 preds = []
